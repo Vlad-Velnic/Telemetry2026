@@ -1,5 +1,10 @@
 #include "includes.h"
 
+// Globals defined in setup.h
+Adafruit_SSD1306 display(128, 64, PIN_OLED_MOSI, PIN_OLED_CLK, PIN_OLED_DC, PIN_OLED_RESET, PIN_OLED_CS);
+Adafruit_MPU6050 mpu;
+bool NO_REAR = false, NO_WIFI = false, NO_ECU = false;
+
 void setupPins() {
   pinMode(PIN_DAMPER_1, INPUT);
   pinMode(PIN_DAMPER_2, INPUT);
@@ -12,30 +17,35 @@ void setupOLED() {
     DEBUG_PRINTLN(F("SSD1306 allocation failed"));
   } else {
     display.clearDisplay();
-    display.setTextSize(8);
+    display.setTextSize(4); // Adjusted for boot screen
     display.setTextColor(SSD1306_WHITE);
-    display.setCursor(5,5);
-    display.println(F("262"));
+    display.setCursor(10,20);
+    display.println(F("BOOT"));
     display.display();
   }
 }
 
 void setupSD() {
+  // Try to mount SD card
   if (!SD.begin(PIN_SD_CS)) {
-    DEBUG_PRINTLN(F("SD Card initialization failed!"));
+    DEBUG_PRINTLN(F("SD Card Init Failed!"));
   } else {
-    DEBUG_PRINTLN(F("SD Card initialized."));
+    DEBUG_PRINTLN(F("SD Card Ready."));
+    // Write a header to the log file to separate boots
+    File f = SD.open("/datalog.csv", FILE_APPEND);
+    if(f) {
+        f.println("---- BOOT ----");
+        f.close();
+    }
   }
 }
 
 void setupMPU() {
   Wire.begin(PIN_MPU_SDA, PIN_MPU_SCL);
-
   if (!mpu.begin(MPU6050_I2CADDR_DEFAULT,&Wire,0)) {
-    DEBUG_PRINTLN(F("Failed to find MPU6050 chip"));
+    DEBUG_PRINTLN(F("MPU6050 Not Found"));
   } else {
-    DEBUG_PRINTLN(F("MPU6050 Found!"));
-    // Optional: Configure ranges
+    DEBUG_PRINTLN(F("MPU6050 OK"));
     mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
     mpu.setGyroRange(MPU6050_RANGE_500_DEG);
     mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
@@ -43,16 +53,29 @@ void setupMPU() {
 }
 
 void setupCAN() {
-  DEBUG_PRINTLN(F("Initializing CAN Bus..."));
+  DEBUG_PRINTLN(F("Initializing Native CAN (TWAI)..."));
 
-  CAN.setPins(PIN_CAN_RX, PIN_CAN_TX);
+  // 1. Config General: TX, RX, Normal Mode
+  twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)PIN_CAN_TX, (gpio_num_t)PIN_CAN_RX, TWAI_MODE_NORMAL);
+  
+  // 2. Config Timing: 500kbps (Matches MegaSquirt)
+  twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
+  
+  // 3. Config Filter: Accept All
+  twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
-  if (!CAN.begin(500E3)) {
-    DEBUG_PRINTLN(F("Starting CAN failed!"));
-    for(int i=0;i<10;i++) {if(CAN.begin(500E3)) break;};
+  // Install Driver
+  if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK) {
+    DEBUG_PRINTLN(F("CAN Driver Installed"));
   } else {
-    DEBUG_PRINTLN(F("CAN Bus Started."));
+    DEBUG_PRINTLN(F("CAN Driver Install FAILED"));
+    return;
+  }
 
-    CAN.onReceive(onCanReceive);
+  // Start Driver
+  if (twai_start() == ESP_OK) {
+    DEBUG_PRINTLN(F("CAN Bus Started"));
+  } else {
+    DEBUG_PRINTLN(F("CAN Start FAILED"));
   }
 }

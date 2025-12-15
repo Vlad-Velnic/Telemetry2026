@@ -1,38 +1,107 @@
 #include "includes.h"
 
-void sendCanMessage(int id, uint8_t* data, size_t length) {
-  if (length > 8) return; // CAN limit is 8 bytes per frame
+// Helper to send message AND log it
+void sendCanMessage(uint32_t id, uint8_t* data, size_t length) {
+    if (length > 8) length = 8;
+    
+    // 1. Send to Bus
+    twai_message_t txMsg;
+    txMsg.identifier = id;
+    txMsg.extd = 0; // Standard ID
+    txMsg.data_length_code = length;
+    memcpy(txMsg.data, data, length);
+    
+    if (twai_transmit(&txMsg, pdMS_TO_TICKS(10)) == ESP_OK) {
+        // DEBUG_PRINTLN("TX OK");
+    }
 
-  CAN.beginPacket(id);
-  CAN.write(data, length);
-  uint8_t status = CAN.endPacket();
-
-  if (status) {
-    DEBUG_PRINT(F("CAN TX Success: ID=0x"));
-    DEBUG_PRINTF("%X\n", id);
-  } else {
-    DEBUG_PRINTLN(F("CAN TX FAILED"));
-  }
+    // 2. Push to Logger Queue (So we know what WE said)
+    LogMessage log;
+    log.id = id;
+    log.len = length;
+    log.timestamp = millis();
+    log.isRx = false; // Outgoing
+    memcpy(log.data, data, length);
+    
+    xQueueSend(canQueue, &log, 0);
 }
 
-void onCanReceive(int packetSize) {
-  long id = CAN.packetId();
-  bool isRemote = CAN.packetRtr();
-  
-  DEBUG_PRINT(F("CAN RX: ID=0x"));
-  DEBUG_PRINTF("%X", id);
-  DEBUG_PRINT(F(" DLC="));
-  DEBUG_PRINT(packetSize);
-  
-  if (isRemote) {
-    DEBUG_PRINTLN(F(" (RTR)"));
-  } else {
-    DEBUG_PRINT(F(" Data=["));
-    while (CAN.available()) {
-      DEBUG_PRINTF("%02X ", CAN.read());
+// --- TASK 1: HIGH PRIORITY CAN RECEIVER ---
+void CAN_Task(void *pvParameters) {
+    twai_message_t rxMsg;
+    LogMessage log;
+
+    while (1) {
+        // Block indefinitely until a message arrives
+        if (twai_receive(&rxMsg, portMAX_DELAY) == ESP_OK) {
+            
+            // 1. Prepare Log Object
+            log.id = rxMsg.identifier;
+            log.len = rxMsg.data_length_code;
+            log.timestamp = millis();
+            log.isRx = true; // Incoming
+            memcpy(log.data, rxMsg.data, rxMsg.data_length_code);
+
+            // 2. Parse Critical Data for Display (MegaSquirt Example)
+            // Adjust IDs based on your MegaSquirt config!
+            if (rxMsg.identifier == 1512) { // Example ID for RPM
+                // MegaSquirt usually sends RPM in bytes 6 and 7 (Big Endian?)
+                // This is just an example parser:
+                 currentRPM = (rxMsg.data[6] << 8) | rxMsg.data[7];
+            }
+            if (rxMsg.identifier == 1513) { // Example ID for Temp
+                 currentTemp = (float)rxMsg.data[0]; 
+            }
+
+            // 3. Push to SD Queue (Don't wait if full)
+            xQueueSend(canQueue, &log, 0);
+        }
     }
-    DEBUG_PRINTLN(F("]"));
-  }
+}
+
+// --- TASK 2: LOW PRIORITY SD WRITER ---
+void SD_Task(void *pvParameters) {
+    LogMessage msg;
+    char buffer[128]; // Buffer for one line
+    
+    // Pre-allocate buffer for SD (speedup)
+    const int BATCH_SIZE = 20; 
+    int batchCount = 0;
+
+    while (1) {
+        // Wait for data (Block up to 100ms)
+        if (xQueueReceive(canQueue, &msg, pdMS_TO_TICKS(100))) {
+            
+            File logFile = SD.open("/datalog.csv", FILE_APPEND);
+            if (logFile) {
+                // Format: Time, RX/TX, ID, Len, Data...
+                int n = sprintf(buffer, "%lu,%s,%X,%d", 
+                    msg.timestamp, 
+                    msg.isRx ? "RX" : "TX", 
+                    msg.id, 
+                    msg.len
+                );
+
+                for (int i = 0; i < msg.len; i++) {
+                    n += sprintf(buffer + n, ",%02X", msg.data[i]);
+                }
+                sprintf(buffer + n, "\n");
+
+                logFile.print(buffer);
+
+                // Flush occasionally to save SD wear and speed up
+                batchCount++;
+                if (batchCount >= BATCH_SIZE) {
+                    logFile.flush();
+                    batchCount = 0;
+                }
+                logFile.close();
+            } else {
+                // SD Error - maybe blink an LED?
+                DEBUG_PRINTLN("SD Write Fail");
+            }
+        }
+    }
 }
 
 void updateDisplay(u_int8_t currentGear, unsigned long lastLapTime, float currentTemp, float currentBatteryVoltage, int currentRPM)

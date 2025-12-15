@@ -4,7 +4,7 @@ import time
 
 # Settings
 BROKER = "broker.hivemq.com"
-TOPIC = "lilygo/gps/data"
+TOPIC = "tuiracing"
 
 
 def on_connect(client, userdata, flags, rc, properties):

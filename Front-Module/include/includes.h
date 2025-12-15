@@ -9,7 +9,11 @@
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
-#include <CAN.h>
+
+#include "driver/twai.h" 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
 
 #include "pinout.h"
 #include "debug.h"
