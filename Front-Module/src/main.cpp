@@ -38,6 +38,4 @@ void loop() {
   // 2. Update Display with latest data (Thread Safe-ish reading of volatiles)
   // We pass 0 as lap time for now
   updateDisplay(0, millis(), currentTemp, currentBat, currentRPM);
-
-  delay(100); // 10Hz Update Rate
 }

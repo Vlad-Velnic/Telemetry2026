@@ -1,11 +1,13 @@
 #ifndef FRONT_MODULE_SETUP
 #define FRONT_MODULE_SETUP
 
-#include "includes.h"
+#include <Arduino.h>
+#include <Adafruit_SSD1306.h>
+#include <Adafruit_MPU6050.h>
 
-Adafruit_SSD1306 display(128, 64, PIN_OLED_MOSI, PIN_OLED_CLK, PIN_OLED_DC, PIN_OLED_RESET, PIN_OLED_CS);
-Adafruit_MPU6050 mpu;
-bool NO_REAR, NO_WIFI, NO_ECU;
+extern Adafruit_SSD1306 display;
+extern Adafruit_MPU6050 mpu;
+extern bool NO_REAR, NO_WIFI, NO_ECU;
 
 void setupPins();
 void setupOLED();

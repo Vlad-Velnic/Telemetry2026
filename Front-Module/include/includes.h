@@ -1,6 +1,7 @@
 #ifndef FRONT_MODULE_INCLUDES
 #define FRONT_MODULE_INCLUDES
 
+// Libraries
 #include <Arduino.h>
 #include <SPI.h>
 #include <Wire.h>
@@ -15,6 +16,7 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 
+// Local Modules
 #include "pinout.h"
 #include "debug.h"
 #include "setup.h"

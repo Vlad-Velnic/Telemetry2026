@@ -1,6 +1,5 @@
 #include "includes.h"
 
-// Globals defined in setup.h
 Adafruit_SSD1306 display(128, 64, PIN_OLED_MOSI, PIN_OLED_CLK, PIN_OLED_DC, PIN_OLED_RESET, PIN_OLED_CS);
 Adafruit_MPU6050 mpu;
 bool NO_REAR = false, NO_WIFI = false, NO_ECU = false;
