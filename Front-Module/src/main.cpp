@@ -11,9 +11,9 @@ void setup() {
   DEBUG_PRINTLN("Booting Front Module...");
 
   setupPins();
-  setupOLED();
   setupMPU();
   setupSD();
+  setupOLED();
   setupCAN();
 
   canQueue = xQueueCreate(300, sizeof(LogMessage));
@@ -34,6 +34,8 @@ void loop() {
   // 1. Read Local Sensors (Example)
   // int damp1 = analogRead(PIN_DAMPER_1);
   // sendCanMessage(0x200, (uint8_t*)&damp1, 2); // Send to backend
+  //readMPUData();
+  //delay(1000);
   
   // 2. Update Display with latest data (Thread Safe-ish reading of volatiles)
   // We pass 0 as lap time for now

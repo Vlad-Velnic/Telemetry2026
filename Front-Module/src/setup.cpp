@@ -27,9 +27,10 @@ void setupSD() {
   DEBUG_PRINTLN(F("Initializing SD Card..."));
   
   SPI.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
-
-  delay(100);
-  if (!SD.begin(PIN_SD_CS)) {
+  DEBUG_PRINTLN("SPI Started");
+  SPI.setDataMode(SPI_MODE0);
+  DEBUG_PRINTLN("SPI mode 0 Started");
+  if (!SD.begin(PIN_SD_CS,SPI)) {
     DEBUG_PRINTLN(F("SD Card Init Failed!"));
   } else {
     DEBUG_PRINTLN(F("SD Card Ready."));
@@ -46,6 +47,7 @@ void setupSD() {
 
 void setupMPU() {
   Wire.begin(PIN_MPU_SDA, PIN_MPU_SCL);
+  Wire.setClock(100000);
   if (!mpu.begin(MPU6050_I2CADDR_DEFAULT,&Wire,0)) {
     DEBUG_PRINTLN(F("MPU6050 Not Found"));
   } else {

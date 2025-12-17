@@ -164,3 +164,74 @@ void updateDisplay(u_int8_t currentGear, unsigned long lastLapTime, float curren
     display.display();
     return;
 }
+
+void readMPUData() {
+    sensors_event_t a, g, temp;
+    
+    // getEvent returns true on success, false on failure
+    if (mpu.getEvent(&a, &g, &temp)) {
+        Serial.printf("MPU6050 >> Accel: [%.2f, %.2f, %.2f] m/s^2 | Gyro: [%.2f, %.2f, %.2f] rad/s | Temp: %.2f C\n",
+            a.acceleration.x,
+            a.acceleration.y,
+            a.acceleration.z,
+            g.gyro.x,
+            g.gyro.y,
+            g.gyro.z,
+            temp.temperature
+        );
+    } else {
+        Serial.println("MPU6050 >> Read Error (I2C Failed)");
+    }
+}
+
+void readMPUData2() {
+    const int MPU_ADDR = 0x68;
+    int16_t acX, acY, acZ, tmp, gyX, gyY, gyZ;
+
+    // 1. Begin Transmission
+    Wire.beginTransmission(MPU_ADDR);
+    Wire.write(0x3B); // Start at Accel Register
+    int error = Wire.endTransmission(false);
+
+    if (error != 0) {
+        // If connection fails, try to reset the bus
+        Serial.printf("MPU >> I2C Error [%d]. Resetting Bus...\n", error);
+        //resetI2CBus();
+        return; 
+    }
+
+    // 2. Request 14 Bytes
+    int count = Wire.requestFrom(MPU_ADDR, 14, 1);
+    if (count == 14) {
+        acX = Wire.read() << 8 | Wire.read();
+        acY = Wire.read() << 8 | Wire.read();
+        acZ = Wire.read() << 8 | Wire.read();
+        tmp = Wire.read() << 8 | Wire.read();
+        gyX = Wire.read() << 8 | Wire.read();
+        gyY = Wire.read() << 8 | Wire.read();
+        gyZ = Wire.read() << 8 | Wire.read();
+
+        // Convert to physical values
+        // Accel range default +/- 2g (16384 LSB/g)
+        float ax = acX / 16384.0;
+        float ay = acY / 16384.0;
+        float az = acZ / 16384.0;
+        
+        // Temp formula: (Raw / 340.0) + 36.53
+        float temperature = (tmp / 340.00) + 36.53;
+
+        // Filter out garbage data (e.g., > 80C is impossible)
+        if (temperature > 80.0 || temperature < -20.0) {
+            Serial.println("MPU >> Garbage Data Ignored");
+            return;
+        }
+
+        Serial.printf("MPU >> Acc: [%.2f, %.2f, %.2f] | Temp: %.2f C\n", ax, ay, az, temperature);
+        
+        // Update global variables for Display
+        currentTemp = temperature;
+        
+    } else {
+        Serial.println("MPU >> Read Timeout");
+    }
+}
