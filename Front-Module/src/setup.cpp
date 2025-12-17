@@ -8,7 +8,6 @@ void setupPins() {
   pinMode(PIN_DAMPER_1, INPUT);
   pinMode(PIN_DAMPER_2, INPUT);
   pinMode(PIN_STEERING, INPUT);
-  pinMode(PIN_THROTTLE, INPUT);
 }
 
 void setupOLED() {
@@ -25,16 +24,22 @@ void setupOLED() {
 }
 
 void setupSD() {
-  // Try to mount SD card
+  DEBUG_PRINTLN(F("Initializing SD Card..."));
+  
+  SPI.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
+
+  delay(100);
   if (!SD.begin(PIN_SD_CS)) {
     DEBUG_PRINTLN(F("SD Card Init Failed!"));
   } else {
     DEBUG_PRINTLN(F("SD Card Ready."));
-    // Write a header to the log file to separate boots
+    
     File f = SD.open("/datalog.csv", FILE_APPEND);
     if(f) {
         f.println("---- BOOT ----");
         f.close();
+    } else {
+        DEBUG_PRINTLN(F("Failed to open log file"));
     }
   }
 }
