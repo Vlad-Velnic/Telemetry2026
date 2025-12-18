@@ -9,7 +9,7 @@
 constexpr int8_t PIN_OLED_MOSI  = GPIO_NUM_23;
 constexpr int8_t PIN_OLED_CLK   = GPIO_NUM_18;
 constexpr int8_t PIN_OLED_DC    = GPIO_NUM_33;
-constexpr int8_t PIN_OLED_CS    = GPIO_NUM_35;
+constexpr int8_t PIN_OLED_CS    = GPIO_NUM_4;
 constexpr int8_t PIN_OLED_RESET = -1;
 
 // ================================================================
