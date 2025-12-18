@@ -1,6 +1,9 @@
 #include "includes.h"
 
-Adafruit_SSD1306 display(128, 64, PIN_OLED_MOSI, PIN_OLED_CLK, PIN_OLED_DC, PIN_OLED_RESET, PIN_OLED_CS);
+
+SPIClass sdSPI(HSPI);
+SPIClass oledSPI(VSPI);
+Adafruit_SSD1306 display(128, 64, &oledSPI, PIN_OLED_DC, PIN_OLED_RESET, PIN_OLED_CS);
 Adafruit_MPU6050 mpu;
 bool NO_REAR = false, NO_WIFI = false, NO_ECU = false;
 
@@ -11,6 +14,7 @@ void setupPins() {
 }
 
 void setupOLED() {
+  oledSPI.begin(PIN_OLED_CLK, -1, PIN_OLED_MOSI, PIN_OLED_CS);
   if(!display.begin(SSD1306_SWITCHCAPVCC)) { 
     DEBUG_PRINTLN(F("SSD1306 allocation failed"));
   } else {
@@ -30,7 +34,7 @@ void setupSD() {
   DEBUG_PRINTLN("SPI Started");
   SPI.setDataMode(SPI_MODE0);
   DEBUG_PRINTLN("SPI mode 0 Started");
-  if (!SD.begin(PIN_SD_CS,SPI)) {
+  if (!SD.begin(PIN_SD_CS,sdSPI)) {
     DEBUG_PRINTLN(F("SD Card Init Failed!"));
   } else {
     DEBUG_PRINTLN(F("SD Card Ready."));
