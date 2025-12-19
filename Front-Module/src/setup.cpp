@@ -30,10 +30,13 @@ void setupOLED() {
 void setupSD() {
   DEBUG_PRINTLN(F("Initializing SD Card..."));
   
-  SPI.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
+  sdSPI.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
   DEBUG_PRINTLN("SPI Started");
-  SPI.setDataMode(SPI_MODE0);
+  sdSPI.setDataMode(SPI_MODE0);
   DEBUG_PRINTLN("SPI mode 0 Started");
+
+  delay(100);
+
   if (!SD.begin(PIN_SD_CS,sdSPI)) {
     DEBUG_PRINTLN(F("SD Card Init Failed!"));
   } else {

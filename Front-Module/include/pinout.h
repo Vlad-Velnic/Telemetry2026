@@ -18,7 +18,7 @@ constexpr int8_t PIN_OLED_RESET = -1;
 constexpr int8_t PIN_SD_MOSI = GPIO_NUM_13;
 constexpr int8_t PIN_SD_MISO = GPIO_NUM_12;
 constexpr int8_t PIN_SD_SCK  = GPIO_NUM_14;
-constexpr int8_t PIN_SD_CS   = GPIO_NUM_15; // 22 in pinout
+constexpr int8_t PIN_SD_CS   = GPIO_NUM_27; // 22 in pinout
 
 // ================================================================
 // ANALOG SENSORS
@@ -37,6 +37,6 @@ constexpr int8_t PIN_MPU_SCL = GPIO_NUM_25;
 // CAN BUS (TJA1050)
 // ================================================================
 constexpr int8_t PIN_CAN_TX = GPIO_NUM_26;
-constexpr int8_t PIN_CAN_RX = GPIO_NUM_27;
+constexpr int8_t PIN_CAN_RX = GPIO_NUM_32;
 
 #endif
