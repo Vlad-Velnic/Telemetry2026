@@ -27,8 +27,7 @@ void setup() {
 
 void loop() {
   unsigned long currentMillis = millis();
-
-  // --- 1. CITIRE SENZORI ANALOGICI ---
+  
   int damper1 = analogRead(PIN_DAMPER_1);
   int damper2 = analogRead(PIN_DAMPER_2);
   int steering = analogRead(PIN_STEERING);
@@ -40,8 +39,6 @@ void loop() {
 
   sendCanMessage(CAN_ID_ANALOG_SENSORS, analogMsg, 6);
 
-
-  // --- 2. CITIRE MPU6050 ---
   sensors_event_t a, g, temp;
   if (mpu.getEvent(&a, &g, &temp)) {
       int16_t ax = (int16_t)(a.acceleration.x * 100);
