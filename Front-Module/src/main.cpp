@@ -27,33 +27,36 @@ void setup() {
 
 void loop() {
   unsigned long currentMillis = millis();
-  
-  int damper1 = analogRead(PIN_DAMPER_1);
-  int damper2 = analogRead(PIN_DAMPER_2);
-  int steering = analogRead(PIN_STEERING);
 
-  uint8_t analogMsg[6];
-  analogMsg[0] = (damper1 >> 8) & 0xFF; analogMsg[1] = damper1 & 0xFF;
-  analogMsg[2] = (damper2 >> 8) & 0xFF; analogMsg[3] = damper2 & 0xFF;
-  analogMsg[4] = (steering >> 8) & 0xFF; analogMsg[5] = steering & 0xFF;
+    // 1. Read Analog Sensors
+    int d1 = analogRead(PIN_DAMPER_1);
+    int d2 = analogRead(PIN_DAMPER_2);
+    int str = analogRead(PIN_STEERING);
 
-  sendCanMessage(CAN_ID_ANALOG_SENSORS, analogMsg, 6);
+    uint8_t analogMsg[6];
+    analogMsg[0] = (d1 >> 8) & 0xFF; analogMsg[1] = d1 & 0xFF;
+    analogMsg[2] = (d2 >> 8) & 0xFF; analogMsg[3] = d2 & 0xFF;
+    analogMsg[4] = (str >> 8) & 0xFF; analogMsg[5] = str & 0xFF;
 
-  sensors_event_t a, g, temp;
-  if (mpu.getEvent(&a, &g, &temp)) {
-      int16_t ax = (int16_t)(a.acceleration.x * 100);
-      int16_t ay = (int16_t)(a.acceleration.y * 100);
-      int16_t az = (int16_t)(a.acceleration.z * 100);
+    broadcastData(CAN_ID_FRONT_ANALOG, analogMsg, 6);
 
-      uint8_t accelMsg[6];
-      accelMsg[0] = (ax >> 8) & 0xFF; accelMsg[1] = ax & 0xFF;
-      accelMsg[2] = (ay >> 8) & 0xFF; accelMsg[3] = ay & 0xFF;
-      accelMsg[4] = (az >> 8) & 0xFF; accelMsg[5] = az & 0xFF;
-      
-      sendCanMessage(CAN_ID_ACCEL_DATA, accelMsg, 6);
-  }
+    // 2. Read MPU (Accel)
+    sensors_event_t a, g, temp;
+    if (mpu.getEvent(&a, &g, &temp)) {
+        int16_t ax = (int16_t)(a.acceleration.x * 100);
+        int16_t ay = (int16_t)(a.acceleration.y * 100);
+        int16_t az = (int16_t)(a.acceleration.z * 100);
 
-  updateDisplay(currentGear, lastLapTime, currentTemp, currentBat, currentRPM);
+        uint8_t accelMsg[6];
+        accelMsg[0] = (ax >> 8) & 0xFF; accelMsg[1] = ax & 0xFF;
+        accelMsg[2] = (ay >> 8) & 0xFF; accelMsg[3] = ay & 0xFF;
+        accelMsg[4] = (az >> 8) & 0xFF; accelMsg[5] = az & 0xFF;
+        
+        broadcastData(CAN_ID_ACCEL, accelMsg, 6);
+    }
 
-  delay(50);
+    // 3. Update Display
+    updateDisplay(currentGear, lastLapTime, currentTemp, currentBat, currentRPM);
+
+    delay(20); // 50Hz Loop
 }

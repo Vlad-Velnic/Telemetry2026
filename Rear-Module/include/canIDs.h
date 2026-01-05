@@ -25,6 +25,6 @@
 #define CAN_ID_GPS_POS        0x800 // Data: [Lat_B0..B3, Lon_B0..B3]
 #define CAN_ID_GPS_SPD        0x801 // Data: [Spd_B0..B3, 0, 0, 0, 0]
 
-#define CAN_ID_LAPTIME        0x900 // laptime calculation
+#define CAN_ID_LAPTIME        0x900 // laptime
 
 #endif

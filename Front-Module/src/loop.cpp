@@ -1,5 +1,28 @@
 #include "includes.h"
 
+void broadcastData(uint32_t id, uint8_t* data, size_t len) {
+    if (len > 8) len = 8;
+
+    // 1. Send to CAN Bus (So Rear Module gets it)
+    twai_message_t txMsg;
+    txMsg.identifier = id;
+    txMsg.extd = 0;
+    txMsg.data_length_code = len;
+    memcpy(txMsg.data, data, len);
+    twai_transmit(&txMsg, pdMS_TO_TICKS(5));
+
+    // 2. Send to SD Queue (So we log it)
+    // We treat our own data exactly like data received from outside
+    LogMessage log;
+    log.id = id;
+    log.len = len;
+    log.timestamp = millis();
+    log.isRx = false; // It's TX, but for the log format it's just data
+    memcpy(log.data, data, len);
+    
+    xQueueSend(canQueue, &log, 0);
+}
+
 // Functie helper pentru trimitere CAN + Logare SD
 void sendCanMessage(uint32_t id, uint8_t* data, size_t length) {
     if (length > 8) length = 8;
@@ -33,53 +56,27 @@ void CAN_Task(void *pvParameters) {
     while (1) {
         if (twai_receive(&rxMsg, portMAX_DELAY) == ESP_OK) {
             
-            // 1. Pregătește obiectul pentru logare SD
+            // 1. Log EVERYTHING received
             log.id = rxMsg.identifier;
             log.len = rxMsg.data_length_code;
             log.timestamp = millis();
-            log.isRx = true; // Marcam ca mesaj RX (primit)
+            log.isRx = true;
             memcpy(log.data, rxMsg.data, rxMsg.data_length_code);
-
-            // 2. Parsează datele critice pentru Display
-            switch (rxMsg.identifier) {
-                case CAN_ID_RPM:
-                    // Exemplu: RPM pe 2 bytes (Big Endian)
-                    if (rxMsg.data_length_code >= 2) {
-                        currentRPM = (rxMsg.data[0] << 8) | rxMsg.data[1];
-                    }
-                    break;
-
-                case CAN_ID_VOLTAGE:
-                    // Exemplu: Voltaj x 10
-                    if (rxMsg.data_length_code >= 1) {
-                        currentBat = (float)rxMsg.data[0] / 10.0; 
-                    }
-                    break;
-
-                case CAN_ID_WATER_TEMP:
-                    if (rxMsg.data_length_code >= 1) {
-                        currentTemp = (float)rxMsg.data[0];
-                    }
-                    break;
-                
-                case CAN_ID_GEAR:
-                     if (rxMsg.data_length_code >= 1) {
-                        currentGear = rxMsg.data[0];
-                    }
-                    break;
-
-                case CAN_ID_LAPTIME:
-                    // Exemplu: Timp in ms (4 bytes)
-                    if (rxMsg.data_length_code >= 4) {
-                        uint32_t tempTime;
-                        memcpy(&tempTime, rxMsg.data, 4);
-                        lastLapTime = tempTime;
-                    }
-                    break;
-            }
-
-            // 3. Trimite la SD Queue (indiferent de ID, logăm tot ce auzim)
             xQueueSend(canQueue, &log, 0);
+
+            // 2. Update Display Variables (Only if relevant)
+            if (rxMsg.identifier == CAN_ID_RPM && rxMsg.data_length_code >= 2) {
+                currentRPM = (rxMsg.data[0] << 8) | rxMsg.data[1];
+            }
+            else if (rxMsg.identifier == CAN_ID_VOLTAGE) {
+                currentBat = (float)rxMsg.data[0] / 10.0;
+            }
+            else if (rxMsg.identifier == CAN_ID_WATER_TEMP) {
+                currentTemp = (float)rxMsg.data[0];
+            }
+            else if (rxMsg.identifier == CAN_ID_GEAR) {
+                currentGear = rxMsg.data[0];
+            }
         }
     }
 }
@@ -87,35 +84,39 @@ void CAN_Task(void *pvParameters) {
 // --- TASK: SD WRITER (Rămâne neschimbat, doar formatarea datelor) ---
 void SD_Task(void *pvParameters) {
     LogMessage msg;
-    char buffer[200]; 
-    const int BATCH_SIZE = 10; 
+    char buffer[256]; 
+    char hexData[20];
+    const int BATCH_SIZE = 20; 
     int batchCount = 0;
 
+    File logFile = SD.open("/datalog.csv", FILE_APPEND);
+
     while (1) {
-        if (xQueueReceive(canQueue, &msg, pdMS_TO_TICKS(200))) {
-            File logFile = SD.open("/datalog.csv", FILE_APPEND);
+        if (xQueueReceive(canQueue, &msg, pdMS_TO_TICKS(500))) {
+            if (!logFile) logFile = SD.open("/datalog.csv", FILE_APPEND);
+            
             if (logFile) {
-                // CSV Format: Time,DIR,ID,Len,D0,D1,D2,D3,D4,D5,D6,D7
-                int n = sprintf(buffer, "%lu,%s,%X,%d", 
-                    msg.timestamp, 
-                    msg.isRx ? "RX" : "TX", 
-                    msg.id, 
-                    msg.len
-                );
+                // Convert data to Hex String for cleaner CSV
+                // Format: AABBCCDDEEFF...
+                hexData[0] = '\0';
                 for (int i = 0; i < msg.len; i++) {
-                    n += sprintf(buffer + n, ",%02X", msg.data[i]);
+                    sprintf(hexData + (i*2), "%02X", msg.data[i]);
                 }
-                sprintf(buffer + n, "\n");
-                logFile.print(buffer);
+
+                // UNIFIED FORMAT: timestamp, id, data
+                logFile.printf("%lu,%X,%s\n", msg.timestamp, msg.id, hexData);
 
                 batchCount++;
                 if (batchCount >= BATCH_SIZE) {
                     logFile.flush();
                     batchCount = 0;
                 }
-                logFile.close();
-            } else {
-                Serial.println("SD Write Fail");
+            }
+        } else {
+            // Periodic flush if idle
+            if (logFile) {
+                logFile.flush();
+                // keeping file open to avoid overhead, close only on stop if needed
             }
         }
     }

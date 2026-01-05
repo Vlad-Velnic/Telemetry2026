@@ -13,5 +13,6 @@ void readMPUData2();
 
 void CAN_Task(void *pvParameters);
 void SD_Task(void *pvParameters);
+void broadcastData(uint32_t id, uint8_t* data, size_t len);
 
 #endif
