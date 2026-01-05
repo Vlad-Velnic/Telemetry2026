@@ -57,7 +57,7 @@ void setupModem() {
         DEBUG_PRINTLN("Modem Hardware Fail!"); 
         // We continue anyway to not block other features
     } else {
-        modem.init();
+        modem.init("0000");
         DEBUG_PRINTLN("Modem Init OK. Connecting to Network...");
         
         // Network Connect
