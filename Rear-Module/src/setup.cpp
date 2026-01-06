@@ -38,9 +38,9 @@ void setupModem() {
     SerialAT.begin(115200, SERIAL_8N1, MODEM_RX, MODEM_TX);
 
     // Power Cycle Sequence
-    digitalWrite(MODEM_PWRKEY, LOW); delay(100);
-    digitalWrite(MODEM_PWRKEY, HIGH); delay(1000);
-    digitalWrite(MODEM_PWRKEY, LOW);
+    digitalWrite(MODEM_PWRKEY, LOW); delay(1000);
+    digitalWrite(MODEM_PWRKEY, HIGH); delay(2000);
+    //digitalWrite(MODEM_PWRKEY, LOW);
 
     // Wait for AT Ready
     bool modemReady = false;

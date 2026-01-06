@@ -103,17 +103,40 @@ bool getFastGPS() {
 // --- TASK: CAN LISTENER ---
 void CAN_RX_Task(void *pvParameters) {
     twai_message_t rxMsg;
-    TelemetryMessage tMsg;
+    TelemetryMessage log;
+
+    Serial.println("--- CAN LISTENER STARTED ---");
 
     while (1) {
-        if (twai_receive(&rxMsg, portMAX_DELAY) == ESP_OK) {
-            // Wrap received CAN frame and push to MQTT queue
-            tMsg.id = rxMsg.identifier;
-            tMsg.len = rxMsg.data_length_code;
-            tMsg.timestamp = millis();
-            memcpy(tMsg.data, rxMsg.data, rxMsg.data_length_code);
+        // Așteaptă un mesaj (blocant)
+        esp_err_t result = twai_receive(&rxMsg, pdMS_TO_TICKS(1000)); // Timeout 1 sec
+
+        if (result == ESP_OK) {
+            Serial.printf("RX ID: 0x%X | Len: %d\n", rxMsg.identifier, rxMsg.data_length_code);
             
-            xQueueSend(mqttQueue, &tMsg, pdMS_TO_TICKS(10));
+            // Trimite spre SD
+            log.id = rxMsg.identifier;
+            log.len = rxMsg.data_length_code;
+            log.timestamp = millis();
+            memcpy(log.data, rxMsg.data, rxMsg.data_length_code);
+            
+            if (xQueueSend(mqttQueue, &log, 0) != pdTRUE) {
+                Serial.println("Eroare: Coada mqtt este plina!");
+            }
+        } 
+        else if (result == ESP_ERR_TIMEOUT) {
+            // Nu e eroare, doar liniste pe fir
+            Serial.println("Waiting for data..."); 
+        }
+        else {
+            // Aici vedem erorile fizice!
+            Serial.printf("CAN ERROR: %s (Code: 0x%X)\n", esp_err_to_name(result), result);
+            
+            // Verificam starea magistralei
+            twai_status_info_t status_info;
+            twai_get_status_info(&status_info);
+            Serial.printf("Status: State=%d, TX_Err=%d, RX_Err=%d, Bus_Err=%d\n", 
+                status_info.state, status_info.tx_error_counter, status_info.rx_error_counter, status_info.bus_error_count);
         }
     }
 }
