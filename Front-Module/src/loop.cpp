@@ -1,9 +1,10 @@
 #include "includes.h"
 
+// Centralized function for CAN sending and SD logging
 void broadcastData(uint32_t id, uint8_t* data, size_t len) {
     if (len > 8) len = 8;
 
-    // 1. Send to CAN Bus (So Rear Module gets it)
+    // 1. Physically send on the CAN bus
     twai_message_t txMsg;
     txMsg.identifier = id;
     txMsg.extd = 0;
@@ -11,39 +12,13 @@ void broadcastData(uint32_t id, uint8_t* data, size_t len) {
     memcpy(txMsg.data, data, len);
     twai_transmit(&txMsg, pdMS_TO_TICKS(5));
 
-    // 2. Send to SD Queue (So we log it)
-    // We treat our own data exactly like data received from outside
+    // 2. Send to queue for SD logging
     LogMessage log;
     log.id = id;
     log.len = len;
     log.timestamp = millis();
-    log.isRx = false; // It's TX, but for the log format it's just data
+    log.isRx = false; // Message sent locally
     memcpy(log.data, data, len);
-    
-    xQueueSend(canQueue, &log, 0);
-}
-
-// Functie helper pentru trimitere CAN + Logare SD
-void sendCanMessage(uint32_t id, uint8_t* data, size_t length) {
-    if (length > 8) length = 8;
-    
-    // 1. Trimite fizic pe magistrala CAN
-    twai_message_t txMsg;
-    txMsg.identifier = id;
-    txMsg.extd = 0; 
-    txMsg.data_length_code = length;
-    memcpy(txMsg.data, data, length);
-    
-    // Nu blocăm prea mult dacă bufferul TX e plin
-    twai_transmit(&txMsg, pdMS_TO_TICKS(5));
-
-    // 2. Trimite în coada pentru SD Card (pentru logare)
-    LogMessage log;
-    log.id = id;
-    log.len = length;
-    log.timestamp = millis();
-    log.isRx = false; // Marcam ca mesaj TX (emis de noi)
-    memcpy(log.data, data, length);
     
     xQueueSend(canQueue, &log, 0);
 }
@@ -81,29 +56,30 @@ void CAN_Task(void *pvParameters) {
     }
 }
 
-// --- TASK: SD WRITER (Rămâne neschimbat, doar formatarea datelor) ---
+// --- TASK: SD WRITER ---
 void SD_Task(void *pvParameters) {
     LogMessage msg;
-    char buffer[256]; 
     char hexData[20];
     const int BATCH_SIZE = 20; 
     int batchCount = 0;
 
-    File logFile = SD.open("/datalog.csv", FILE_APPEND);
+    // Wait for setupSD to set the filename
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
+    File logFile = SD.open(logFileName, FILE_APPEND);
 
     while (1) {
         if (xQueueReceive(canQueue, &msg, pdMS_TO_TICKS(500))) {
-            if (!logFile) logFile = SD.open("/datalog.csv", FILE_APPEND);
+            if (!logFile) logFile = SD.open(logFileName, FILE_APPEND);
             
             if (logFile) {
-                // Convert data to Hex String for cleaner CSV
-                // Format: AABBCCDDEEFF...
+                // Convert data to Hex String
                 hexData[0] = '\0';
                 for (int i = 0; i < msg.len; i++) {
                     sprintf(hexData + (i*2), "%02X", msg.data[i]);
                 }
 
-                // UNIFIED FORMAT: timestamp, id, data
+                // Format: timestamp, id, data
                 logFile.printf("%lu,%X,%s\n", msg.timestamp, msg.id, hexData);
 
                 batchCount++;
@@ -116,7 +92,6 @@ void SD_Task(void *pvParameters) {
             // Periodic flush if idle
             if (logFile) {
                 logFile.flush();
-                // keeping file open to avoid overhead, close only on stop if needed
             }
         }
     }
@@ -180,76 +155,4 @@ void updateDisplay(u_int8_t currentGear, unsigned long lastLapTime, float curren
     display.printf("%.1fV", currentBatteryVoltage);
 
     display.display();
-    return;
-}
-
-void readMPUData() {
-    sensors_event_t a, g, temp;
-    
-    // getEvent returns true on success, false on failure
-    if (mpu.getEvent(&a, &g, &temp)) {
-        Serial.printf("MPU6050 >> Accel: [%.2f, %.2f, %.2f] m/s^2 | Gyro: [%.2f, %.2f, %.2f] rad/s | Temp: %.2f C\n",
-            a.acceleration.x,
-            a.acceleration.y,
-            a.acceleration.z,
-            g.gyro.x,
-            g.gyro.y,
-            g.gyro.z,
-            temp.temperature
-        );
-    } else {
-        Serial.println("MPU6050 >> Read Error (I2C Failed)");
-    }
-}
-
-void readMPUData2() {
-    const int MPU_ADDR = 0x68;
-    int16_t acX, acY, acZ, tmp, gyX, gyY, gyZ;
-
-    // 1. Begin Transmission
-    Wire.beginTransmission(MPU_ADDR);
-    Wire.write(0x3B); // Start at Accel Register
-    int error = Wire.endTransmission(false);
-
-    if (error != 0) {
-        // If connection fails, try to reset the bus
-        Serial.printf("MPU >> I2C Error [%d]. Resetting Bus...\n", error);
-        //resetI2CBus();
-        return; 
-    }
-
-    // 2. Request 14 Bytes
-    int count = Wire.requestFrom(MPU_ADDR, 14, 1);
-    if (count == 14) {
-        acX = Wire.read() << 8 | Wire.read();
-        acY = Wire.read() << 8 | Wire.read();
-        acZ = Wire.read() << 8 | Wire.read();
-        tmp = Wire.read() << 8 | Wire.read();
-        gyX = Wire.read() << 8 | Wire.read();
-        gyY = Wire.read() << 8 | Wire.read();
-        gyZ = Wire.read() << 8 | Wire.read();
-
-        // Convert to physical values
-        // Accel range default +/- 2g (16384 LSB/g)
-        float ax = acX / 16384.0;
-        float ay = acY / 16384.0;
-        float az = acZ / 16384.0;
-        
-        // Temp formula: (Raw / 340.0) + 36.53
-        float temperature = (tmp / 340.00) + 36.53;
-
-        // Filter out garbage data (e.g., > 80C is impossible)
-        if (temperature > 80.0 || temperature < -20.0) {
-            Serial.println("MPU >> Garbage Data Ignored");
-            return;
-        }
-
-        Serial.printf("MPU >> Acc: [%.2f, %.2f, %.2f] | Temp: %.2f C\n", ax, ay, az, temperature);
-        
-        // Update global variables for Display
-        currentTemp = temperature;
-        
-    } else {
-        Serial.println("MPU >> Read Timeout");
-    }
 }

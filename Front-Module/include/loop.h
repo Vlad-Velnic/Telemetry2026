@@ -5,14 +5,12 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
-
-void sendCanMessage(uint32_t id, uint8_t* data, size_t length);
-void updateDisplay(uint8_t currentGear, unsigned long lastLapTime, float currentTemp, float currentBatteryVoltage, int currentRPM);
-void readMPUData();
-void readMPUData2();
-
+// Task definitions
 void CAN_Task(void *pvParameters);
 void SD_Task(void *pvParameters);
+
+// Utility functions
 void broadcastData(uint32_t id, uint8_t* data, size_t len);
+void updateDisplay(uint8_t currentGear, unsigned long lastLapTime, float currentTemp, float currentBatteryVoltage, int currentRPM);
 
 #endif

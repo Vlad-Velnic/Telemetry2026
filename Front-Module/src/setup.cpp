@@ -42,9 +42,26 @@ void setupSD() {
   } else {
     DEBUG_PRINTLN(F("SD Card Ready."));
     
-    File f = SD.open("/datalog.csv", FILE_APPEND);
+    // Retrieve session index from NVS (Flash)
+    Preferences prefs;
+    prefs.begin("telemetry", false); // "telemetry" namespace
+    unsigned int sessionIndex = prefs.getUInt("index", 0);
+    
+    // Increment and save for next time
+    sessionIndex++;
+    prefs.putUInt("index", sessionIndex);
+    prefs.end();
+
+    sprintf(logFileName, "/log_%04u.csv", sessionIndex);
+    
+    DEBUG_PRINT(F("Starting session index: "));
+    DEBUG_PRINTLN(sessionIndex);
+    DEBUG_PRINT(F("Log file: "));
+    DEBUG_PRINTLN(logFileName);
+
+    File f = SD.open(logFileName, FILE_WRITE);
     if(f) {
-        f.println("---- BOOT ----");
+        f.println(F("---- BOOT SESSION START ----"));
         f.close();
     } else {
         DEBUG_PRINTLN(F("Failed to open log file"));
@@ -68,13 +85,13 @@ void setupMPU() {
 void setupCAN() {
   DEBUG_PRINTLN(F("Initializing Native CAN (TWAI)..."));
 
-  // 1. Config General: TX, RX, Normal Mode
+  // 1. General Config: TX, RX, Normal Mode
   twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)PIN_CAN_TX, (gpio_num_t)PIN_CAN_RX, TWAI_MODE_NORMAL);
   
-  // 2. Config Timing: 500kbps (Matches MegaSquirt)
+  // 2. Timing Config: 500kbps (Matches MegaSquirt)
   twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
   
-  // 3. Config Filter: Accept All
+  // 3. Filter Config: Accept All
   twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
   // Install Driver

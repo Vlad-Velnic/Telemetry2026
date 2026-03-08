@@ -10,6 +10,7 @@
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
+#include <Preferences.h>
 #include "driver/twai.h" 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -22,7 +23,13 @@
 #include "loop.h"
 #include "canIDs.h"
 
-// --- GLOBALE PENTRU DATE (Shared) ---
+// Timing Constants
+#define LOGGING_FREQ_HZ 20
+#define DISPLAY_FREQ_HZ 10
+#define LOGGING_PERIOD_MS (1000 / LOGGING_FREQ_HZ)
+#define DISPLAY_PERIOD_MS (1000 / DISPLAY_FREQ_HZ)
+
+// --- DATA GLOBALS (Shared) ---
 extern volatile int currentRPM;
 extern volatile float currentTemp;
 extern volatile float currentBat;
@@ -32,20 +39,21 @@ extern volatile unsigned long lastLapTime;
 extern bool NO_REAR, NO_WIFI, NO_ECU;
 
 
-// Instanță SPI dedicată pentru SD Card (HSPI)
+// Dedicated SPI instance for SD Card (HSPI)
 extern SPIClass sdSPI;
 
-// Structura pentru coada de mesaje
+// Structure for message queue
 struct LogMessage {
     uint32_t id;
     uint8_t len;
     uint8_t data[8];
     unsigned long timestamp;
-    bool isRx; // true = RX (primit), false = TX (trimis de noi)
+    bool isRx; // true = RX (received), false = TX (sent by us)
 };
 
 extern QueueHandle_t canQueue;
 extern Adafruit_SSD1306 display;
 extern Adafruit_MPU6050 mpu;
+extern char logFileName[32];
 
 #endif

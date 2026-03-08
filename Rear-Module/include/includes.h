@@ -30,6 +30,9 @@ extern volatile float gps_lon;
 extern volatile float gps_speed;
 extern volatile int currentGear;
 
+// --- QUEUES ---
+extern QueueHandle_t mqttQueue;
+
 // --- DATA STRUCTURES ---
 struct TelemetryMessage {
     uint32_t id;
@@ -46,10 +49,12 @@ void setupMQTT();
 void setupCAN();
 
 // Loop / Tasks
-void MQTT_And_Sensor_Loop();
 void CAN_RX_Task(void *pvParameters);
 void Sensor_Task(void *pvParameters);
 void MQTT_Task(void *pvParameters); // Unified MQTT handler
 bool getFastGPS();
+void broadcastData(uint32_t id, uint8_t* data, size_t len);
+int getGear();
+void sendCanMessage(uint32_t id, uint8_t* data, size_t length);
 
 #endif

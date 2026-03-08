@@ -37,9 +37,9 @@ void broadcastData(uint32_t id, uint8_t* data, size_t len) {
     tMsg.timestamp = millis();
     memcpy(tMsg.data, data, len);
     
-    xQueueSend(mqttQueue, &tMsg, 0);
+    // Wait max 2ms to push to queue if full, to not stall sensor reading completely
+    xQueueSend(mqttQueue, &tMsg, pdMS_TO_TICKS(2));
 }
-
 
 int getGear() {
     // Returns 1-6 if pin active, 0 if none (Neutral)
@@ -100,67 +100,13 @@ bool getFastGPS() {
     return true;
 }
 
-// --- TASK: CAN LISTENER ---
-void CAN_RX_Task(void *pvParameters) {
-    twai_message_t rxMsg;
-    TelemetryMessage log;
-
-    Serial.println("--- CAN LISTENER STARTED ---");
+// --- TASK: SENSOR READING (20Hz) ---
+void Sensor_Task(void *pvParameters) {
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    const TickType_t xFrequency = pdMS_TO_TICKS(50); // Strictly 50ms = 20Hz
 
     while (1) {
-        // Așteaptă un mesaj (blocant)
-        esp_err_t result = twai_receive(&rxMsg, pdMS_TO_TICKS(1000)); // Timeout 1 sec
-
-        if (result == ESP_OK) {
-            Serial.printf("RX ID: 0x%X | Len: %d\n", rxMsg.identifier, rxMsg.data_length_code);
-            
-            // Trimite spre SD
-            log.id = rxMsg.identifier;
-            log.len = rxMsg.data_length_code;
-            log.timestamp = millis();
-            memcpy(log.data, rxMsg.data, rxMsg.data_length_code);
-            
-            if (xQueueSend(mqttQueue, &log, 0) != pdTRUE) {
-                Serial.println("Eroare: Coada mqtt este plina!");
-            }
-        } 
-        else if (result == ESP_ERR_TIMEOUT) {
-            // Nu e eroare, doar liniste pe fir
-            Serial.println("Waiting for data..."); 
-        }
-        else {
-            // Aici vedem erorile fizice!
-            Serial.printf("CAN ERROR: %s (Code: 0x%X)\n", esp_err_to_name(result), result);
-            
-            // Verificam starea magistralei
-            twai_status_info_t status_info;
-            twai_get_status_info(&status_info);
-            Serial.printf("Status: State=%d, TX_Err=%d, RX_Err=%d, Bus_Err=%d\n", 
-                status_info.state, status_info.tx_error_counter, status_info.rx_error_counter, status_info.bus_error_count);
-        }
-    }
-}
-
-// --- MAIN LOOP FUNCTION: SENSORS & MQTT PUBLISH ---
-// We handle MQTT in the main loop to avoid stack overflow on small tasks with heavy networking
-void MQTT_And_Sensor_Loop() {
-    static unsigned long lastSensorRead = 0;
-    static unsigned long lastGpsRead = 0;
-    
-    // --- MQTT CONNECTION ---
-    if (!mqtt.connected()) {
-        if (mqtt.connect("RearModuleIdentifier")) {
-            Serial.println("MQTT Connected");
-        } else {
-            delay(100); 
-            return; // Retry next loop
-        }
-    }
-    mqtt.loop();
-
-    // --- SENSOR READING (20Hz) ---
-    if (millis() - lastSensorRead > 50) {
-        lastSensorRead = millis();
+        vTaskDelayUntil(&xLastWakeTime, xFrequency);
 
         // A. Read Analog (Rear Dampers + Brake)
         int dL = analogRead(PIN_DAMPER_RL);
@@ -176,51 +122,104 @@ void MQTT_And_Sensor_Loop() {
 
         // B. Read Gear
         int newGear = getGear();
-        // Broadcast gear continuously or on change? 
-        // Let's do continuously @ 20Hz for reliability
         uint8_t gearMsg[1] = { (uint8_t)newGear };
         broadcastData(CAN_ID_GEAR, gearMsg, 1);
     }
+}
 
-    // --- GPS READING (1Hz) ---
-    if (millis() - lastGpsRead > 1000) {
-        lastGpsRead = millis();
-        if(getFastGPS()) { // If we got a valid fix
-            
-            // Pack Lat/Lon (2 floats = 8 bytes)
-            uint8_t posMsg[8];
-            memcpy(&posMsg[0], (const void*)&gps_lat, 4);
-            memcpy(&posMsg[4], (const void*)&gps_lon, 4);
-            broadcastData(CAN_ID_GPS_POS, posMsg, 8);
-
-            // Pack Speed (1 float = 4 bytes)
-            uint8_t spdMsg[4];
-            memcpy(&spdMsg[0], (const void*)&gps_speed, 4);
-            broadcastData(CAN_ID_GPS_SPD, spdMsg, 4);
-        }
-    }
-
-    // --- MQTT UPLOAD PROCESSING ---
-    // Empty the queue and send to cloud in "timestamp,id,data" format
+// --- TASK: MQTT UPLOAD & GPS (Lower Priority) ---
+void MQTT_Task(void *pvParameters) {
+    unsigned long lastGpsRead = 0;
     TelemetryMessage msg;
     char payload[64];
     char hexData[20];
 
-    // Process up to 10 messages per loop to avoid blocking too long
-    int count = 0;
-    while (xQueueReceive(mqttQueue, &msg, 0) && count < 10) {
-        
-        // Convert data to Hex
-        hexData[0] = '\0';
-        for (int i = 0; i < msg.len; i++) {
-            sprintf(hexData + (i*2), "%02X", msg.data[i]);
+    while (1) {
+        // --- MQTT CONNECTION ---
+        if (!mqtt.connected()) {
+            if (mqtt.connect("RearModuleIdentifier")) {
+                Serial.println("MQTT Connected");
+            } else {
+                vTaskDelay(pdMS_TO_TICKS(100)); // Retry next loop
+                continue;
+            }
+        }
+        mqtt.loop();
+
+        // --- GPS READING (1Hz) ---
+        if (millis() - lastGpsRead > 1000) {
+            lastGpsRead = millis();
+            if(getFastGPS()) { // If we got a valid fix, blocks for ~200ms
+                
+                // Pack Lat/Lon (2 floats = 8 bytes)
+                uint8_t posMsg[8];
+                memcpy(&posMsg[0], (const void*)&gps_lat, 4);
+                memcpy(&posMsg[4], (const void*)&gps_lon, 4);
+                broadcastData(CAN_ID_GPS_POS, posMsg, 8);
+
+                // Pack Speed (1 float = 4 bytes)
+                uint8_t spdMsg[4];
+                memcpy(&spdMsg[0], (const void*)&gps_speed, 4);
+                broadcastData(CAN_ID_GPS_SPD, spdMsg, 4);
+            }
         }
 
-        // UNIFIED FORMAT: timestamp,id,data
-        // Example: "12500,500,AABB1122"
-        sprintf(payload, "%lu,%X,%s", msg.timestamp, msg.id, hexData);
+        // --- MQTT UPLOAD PROCESSING ---
+        // Process up to 20 messages per loop to drain bursty traffic
+        int count = 0;
+        while (xQueueReceive(mqttQueue, &msg, 0) == pdTRUE && count < 20) {
+            // Convert data to Hex
+            hexData[0] = '\0';
+            for (int i = 0; i < msg.len; i++) {
+                sprintf(hexData + (i*2), "%02X", msg.data[i]);
+            }
+
+            // UNIFIED FORMAT: timestamp,id,data
+            sprintf(payload, "%lu,%X,%s", msg.timestamp, msg.id, hexData);
+            
+            mqtt.publish(mqtt_topic, payload);
+            count++;
+        }
         
-        mqtt.publish(mqtt_topic, payload);
-        count++;
+        // Yield to let IDLE tasks run and watchdog kick
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+// --- TASK: CAN LISTENER ---
+void CAN_RX_Task(void *pvParameters) {
+    twai_message_t rxMsg;
+    TelemetryMessage log;
+
+    Serial.println("--- CAN LISTENER STARTED ---");
+
+    while (1) {
+        // Wait for message (blocking)
+        esp_err_t result = twai_receive(&rxMsg, pdMS_TO_TICKS(1000)); // Timeout 1 sec
+
+        if (result == ESP_OK) {
+            Serial.printf("RX ID: 0x%X | Len: %d\n", rxMsg.identifier, rxMsg.data_length_code);
+            
+            log.id = rxMsg.identifier;
+            log.len = rxMsg.data_length_code;
+            log.timestamp = millis();
+            memcpy(log.data, rxMsg.data, rxMsg.data_length_code);
+            
+            if (xQueueSend(mqttQueue, &log, pdMS_TO_TICKS(5)) != pdTRUE) {
+                Serial.println("Error: MQTT queue is full, dropping CAN message!");
+            }
+        } 
+        else if (result == ESP_ERR_TIMEOUT) {
+            // Just silence on the bus
+            // Serial.println("Waiting for data..."); 
+        }
+        else {
+            Serial.printf("CAN ERROR: %s (Code: 0x%X)\n", esp_err_to_name(result), result);
+            
+            twai_status_info_t status_info;
+            twai_get_status_info(&status_info);
+            Serial.printf("Status: State=%d, TX_Err=%d, RX_Err=%d, Bus_Err=%d\n", 
+                status_info.state, status_info.tx_error_counter, status_info.rx_error_counter, status_info.bus_error_count);
+        }
     }
 }
