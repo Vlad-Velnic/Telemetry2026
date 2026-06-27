@@ -24,7 +24,7 @@
 #include "canIDs.h"
 
 // Timing Constants
-#define LOGGING_FREQ_HZ 20
+#define LOGGING_FREQ_HZ 25
 #define DISPLAY_FREQ_HZ 10
 #define LOGGING_PERIOD_MS (1000 / LOGGING_FREQ_HZ)
 #define DISPLAY_PERIOD_MS (1000 / DISPLAY_FREQ_HZ)

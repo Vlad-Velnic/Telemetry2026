@@ -100,10 +100,10 @@ bool getFastGPS() {
     return true;
 }
 
-// --- TASK: SENSOR READING (20Hz) ---
+// --- TASK: SENSOR READING ---
 void Sensor_Task(void *pvParameters) {
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t xFrequency = pdMS_TO_TICKS(50); // Strictly 50ms = 20Hz
+    const TickType_t xFrequency = pdMS_TO_TICKS(SENSOR_PERIOD_MS);
 
     while (1) {
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
@@ -185,6 +185,35 @@ void MQTT_Task(void *pvParameters) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
+
+#if ENABLE_OTA
+// --- TASK: OTA UPDATE HANDLER (Lowest Priority) ---
+void OTA_Task(void *pvParameters) {
+    unsigned long lastReconnectAttempt = 0;
+
+    while (1) {
+        if (WiFi.status() == WL_CONNECTED) {
+            if (!otaReady) {
+                setupOTA();
+            } else {
+                ArduinoOTA.handle();
+            }
+
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+
+        otaReady = false;
+
+        if (millis() - lastReconnectAttempt >= OTA_RECONNECT_INTERVAL_MS) {
+            lastReconnectAttempt = millis();
+            setupOTA();
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+#endif
 
 // --- TASK: CAN LISTENER ---
 void CAN_RX_Task(void *pvParameters) {

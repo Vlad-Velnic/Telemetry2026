@@ -5,6 +5,9 @@
 TinyGsm modem(SerialAT);
 TinyGsmClient client(modem);
 PubSubClient mqtt(client);
+#if ENABLE_OTA
+volatile bool otaReady = false;
+#endif
 
 // --- SETTINGS ---
 const char apn[] = "net";
@@ -82,6 +85,54 @@ void setupMQTT() {
     mqtt.setServer(mqtt_server, 1883);
     // Callback can be added here if we need to receive commands
 }
+
+#if ENABLE_OTA
+void setupOTA() {
+    DEBUG_PRINTLN("Initializing OTA Wi-Fi...");
+
+    WiFi.persistent(false);
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
+    WiFi.setHostname(OTA_HOSTNAME);
+    WiFi.begin(OTA_WIFI_SSID, OTA_WIFI_PASSWORD);
+
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < OTA_CONNECT_TIMEOUT_MS) {
+        delay(100);
+    }
+
+    if (WiFi.status() != WL_CONNECTED) {
+        otaReady = false;
+        DEBUG_PRINTLN("OTA Wi-Fi not available; continuing without OTA for now");
+        return;
+    }
+
+    ArduinoOTA.setHostname(OTA_HOSTNAME);
+    ArduinoOTA.setPassword(OTA_UPDATE_PASSWORD);
+
+    ArduinoOTA.onStart([]() {
+        DEBUG_PRINTLN("OTA update started");
+    });
+
+    ArduinoOTA.onEnd([]() {
+        DEBUG_PRINTLN("OTA update finished");
+    });
+
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+        DEBUG_PRINTF("OTA progress: %u%%\n", (progress * 100) / total);
+    });
+
+    ArduinoOTA.onError([](ota_error_t error) {
+        DEBUG_PRINTF("OTA error[%u]\n", error);
+    });
+
+    ArduinoOTA.begin();
+    otaReady = true;
+
+    DEBUG_PRINT("OTA ready. IP: ");
+    DEBUG_PRINTLN(WiFi.localIP());
+}
+#endif
 
 void setupCAN() {
     DEBUG_PRINTLN("Initializing CAN...");
