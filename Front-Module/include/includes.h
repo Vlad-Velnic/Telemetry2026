@@ -28,6 +28,11 @@
 #define DISPLAY_FREQ_HZ 10
 #define LOGGING_PERIOD_MS (1000 / LOGGING_FREQ_HZ)
 #define DISPLAY_PERIOD_MS (1000 / DISPLAY_FREQ_HZ)
+#define HEALTH_PERIOD_MS 5000
+
+// Health frame node IDs
+#define HEALTH_NODE_FRONT 1
+#define HEALTH_NODE_REAR 2
 
 // --- DATA GLOBALS (Shared) ---
 extern volatile int currentRPM;
@@ -35,6 +40,8 @@ extern volatile float currentTemp;
 extern volatile float currentBat;
 extern volatile int currentGear;
 extern volatile unsigned long lastLapTime;
+extern volatile uint32_t frontCanQueueDrops;
+extern volatile uint32_t frontCanTxFailures;
 
 extern bool NO_REAR, NO_WIFI, NO_ECU;
 

@@ -10,7 +10,9 @@ void broadcastData(uint32_t id, uint8_t* data, size_t len) {
     txMsg.extd = 0;
     txMsg.data_length_code = len;
     memcpy(txMsg.data, data, len);
-    twai_transmit(&txMsg, pdMS_TO_TICKS(5));
+    if (twai_transmit(&txMsg, pdMS_TO_TICKS(5)) != ESP_OK) {
+        frontCanTxFailures++;
+    }
 
     // 2. Send to queue for SD logging
     LogMessage log;
@@ -20,7 +22,38 @@ void broadcastData(uint32_t id, uint8_t* data, size_t len) {
     log.isRx = false; // Message sent locally
     memcpy(log.data, data, len);
     
-    xQueueSend(canQueue, &log, 0);
+    if (xQueueSend(canQueue, &log, 0) != pdTRUE) {
+        frontCanQueueDrops++;
+    }
+}
+
+static uint16_t saturateU16(uint32_t value) {
+    return value > 0xFFFF ? 0xFFFF : (uint16_t)value;
+}
+
+void sendHealthFrame() {
+    static uint8_t heartbeat = 0;
+
+    uint16_t queueDrops = saturateU16(frontCanQueueDrops);
+    uint16_t txFailures = saturateU16(frontCanTxFailures);
+    uint8_t queueFree = canQueue ? min((UBaseType_t)255, uxQueueSpacesAvailable(canQueue)) : 0;
+    uint8_t flags = 0;
+
+    if (frontCanQueueDrops > 0) flags |= 0x01;
+    if (frontCanTxFailures > 0) flags |= 0x02;
+
+    uint8_t healthMsg[8] = {
+        HEALTH_NODE_FRONT,
+        flags,
+        (uint8_t)((queueDrops >> 8) & 0xFF),
+        (uint8_t)(queueDrops & 0xFF),
+        (uint8_t)((txFailures >> 8) & 0xFF),
+        (uint8_t)(txFailures & 0xFF),
+        queueFree,
+        heartbeat++
+    };
+
+    broadcastData(CAN_ID_SYSTEM_HEALTH, healthMsg, 8);
 }
 
 // --- TASK: CAN RECEIVER ---
@@ -37,7 +70,9 @@ void CAN_Task(void *pvParameters) {
             log.timestamp = millis();
             log.isRx = true;
             memcpy(log.data, rxMsg.data, rxMsg.data_length_code);
-            xQueueSend(canQueue, &log, 0);
+            if (xQueueSend(canQueue, &log, 0) != pdTRUE) {
+                frontCanQueueDrops++;
+            }
 
             // 2. Update Display Variables (Only if relevant)
             if (rxMsg.identifier == CAN_ID_RPM && rxMsg.data_length_code >= 2) {

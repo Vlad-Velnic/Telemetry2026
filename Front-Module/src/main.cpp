@@ -8,6 +8,8 @@ volatile float currentTemp = 0.0;
 volatile float currentBat = 0.0;
 volatile int currentGear = 0;
 volatile unsigned long lastLapTime = 0;
+volatile uint32_t frontCanQueueDrops = 0;
+volatile uint32_t frontCanTxFailures = 0;
 
 void setup() {
   Serial.begin(115200);
@@ -29,6 +31,7 @@ void setup() {
 void loop() {
   static TickType_t lastWakeTime = xTaskGetTickCount();
   static unsigned long lastDisplayUpdate = 0;
+  static unsigned long lastHealthUpdate = 0;
   unsigned long currentMillis = millis();
 
   // 1. Read Analog Sensors (Dampers, Steering)
@@ -64,6 +67,11 @@ void loop() {
     lastDisplayUpdate = currentMillis;
   }
 
-  // Precise 20Hz (50ms) loop timing
+  if (currentMillis - lastHealthUpdate >= HEALTH_PERIOD_MS) {
+    sendHealthFrame();
+    lastHealthUpdate = currentMillis;
+  }
+
+  // Precise LOGGING_FREQ_HZ loop timing
   vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(LOGGING_PERIOD_MS));
 }

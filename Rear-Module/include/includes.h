@@ -41,6 +41,11 @@ static constexpr uint32_t OTA_RECONNECT_INTERVAL_MS = 10000;
 // --- TIMING CONSTANTS ---
 #define SENSOR_FREQ_HZ 25
 #define SENSOR_PERIOD_MS (1000 / SENSOR_FREQ_HZ)
+#define HEALTH_PERIOD_MS 5000
+
+// Health frame node IDs
+#define HEALTH_NODE_FRONT 1
+#define HEALTH_NODE_REAR 2
 
 // --- GLOBAL OBJECTS ---
 extern TinyGsm modem;
@@ -52,6 +57,9 @@ extern volatile float gps_lat;
 extern volatile float gps_lon;
 extern volatile float gps_speed;
 extern volatile int currentGear;
+extern volatile uint32_t rearMqttQueueDrops;
+extern volatile uint32_t rearMqttPublishFailures;
+extern volatile uint32_t rearCanTxFailures;
 #if ENABLE_OTA
 extern volatile bool otaReady;
 #endif
@@ -84,6 +92,7 @@ void MQTT_Task(void *pvParameters); // Unified MQTT handler
 #if ENABLE_OTA
 void OTA_Task(void *pvParameters);
 #endif
+void sendHealthFrame();
 bool getFastGPS();
 void broadcastData(uint32_t id, uint8_t* data, size_t len);
 int getGear();

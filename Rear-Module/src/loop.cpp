@@ -5,6 +5,9 @@ volatile float gps_lat = 0.0;
 volatile float gps_lon = 0.0;
 volatile float gps_speed = 0.0;
 volatile int currentGear = 0;
+volatile uint32_t rearMqttQueueDrops = 0;
+volatile uint32_t rearMqttPublishFailures = 0;
+volatile uint32_t rearCanTxFailures = 0;
 
 // Queue for outgoing MQTT messages (CAN data)
 QueueHandle_t mqttQueue;
@@ -16,7 +19,9 @@ void sendCanMessage(uint32_t id, uint8_t* data, size_t length) {
     txMsg.extd = 0; 
     txMsg.data_length_code = length;
     memcpy(txMsg.data, data, length);
-    twai_transmit(&txMsg, pdMS_TO_TICKS(5));
+    if (twai_transmit(&txMsg, pdMS_TO_TICKS(5)) != ESP_OK) {
+        rearCanTxFailures++;
+    }
 }
 
 void broadcastData(uint32_t id, uint8_t* data, size_t len) {
@@ -28,7 +33,9 @@ void broadcastData(uint32_t id, uint8_t* data, size_t len) {
     txMsg.extd = 0;
     txMsg.data_length_code = len;
     memcpy(txMsg.data, data, len);
-    twai_transmit(&txMsg, pdMS_TO_TICKS(5));
+    if (twai_transmit(&txMsg, pdMS_TO_TICKS(5)) != ESP_OK) {
+        rearCanTxFailures++;
+    }
 
     // 2. Send to MQTT Queue (So we send it to cloud)
     TelemetryMessage tMsg;
@@ -38,7 +45,44 @@ void broadcastData(uint32_t id, uint8_t* data, size_t len) {
     memcpy(tMsg.data, data, len);
     
     // Wait max 2ms to push to queue if full, to not stall sensor reading completely
-    xQueueSend(mqttQueue, &tMsg, pdMS_TO_TICKS(2));
+    if (xQueueSend(mqttQueue, &tMsg, pdMS_TO_TICKS(2)) != pdTRUE) {
+        rearMqttQueueDrops++;
+    }
+}
+
+static uint16_t saturateU16(uint32_t value) {
+    return value > 0xFFFF ? 0xFFFF : (uint16_t)value;
+}
+
+void sendHealthFrame() {
+    static uint8_t heartbeat = 0;
+
+    uint16_t queueDrops = saturateU16(rearMqttQueueDrops);
+    uint16_t publishFailures = saturateU16(rearMqttPublishFailures);
+    uint8_t queueFree = mqttQueue ? min((UBaseType_t)255, uxQueueSpacesAvailable(mqttQueue)) : 0;
+    uint8_t flags = 0;
+
+    if (rearMqttQueueDrops > 0) flags |= 0x01;
+    if (rearCanTxFailures > 0) flags |= 0x02;
+    if (rearMqttPublishFailures > 0) flags |= 0x04;
+    if (mqtt.connected()) flags |= 0x08;
+#if ENABLE_OTA
+    if (WiFi.status() == WL_CONNECTED) flags |= 0x10;
+    if (otaReady) flags |= 0x20;
+#endif
+
+    uint8_t healthMsg[8] = {
+        HEALTH_NODE_REAR,
+        flags,
+        (uint8_t)((queueDrops >> 8) & 0xFF),
+        (uint8_t)(queueDrops & 0xFF),
+        (uint8_t)((publishFailures >> 8) & 0xFF),
+        (uint8_t)(publishFailures & 0xFF),
+        queueFree,
+        heartbeat++
+    };
+
+    broadcastData(CAN_ID_SYSTEM_HEALTH, healthMsg, 8);
 }
 
 int getGear() {
@@ -104,9 +148,11 @@ bool getFastGPS() {
 void Sensor_Task(void *pvParameters) {
     TickType_t xLastWakeTime = xTaskGetTickCount();
     const TickType_t xFrequency = pdMS_TO_TICKS(SENSOR_PERIOD_MS);
+    unsigned long lastHealthSend = 0;
 
     while (1) {
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
+        unsigned long currentMillis = millis();
 
         // A. Read Analog (Rear Dampers + Brake)
         int dL = analogRead(PIN_DAMPER_RL);
@@ -124,6 +170,11 @@ void Sensor_Task(void *pvParameters) {
         int newGear = getGear();
         uint8_t gearMsg[1] = { (uint8_t)newGear };
         broadcastData(CAN_ID_GEAR, gearMsg, 1);
+
+        if (currentMillis - lastHealthSend >= HEALTH_PERIOD_MS) {
+            lastHealthSend = currentMillis;
+            sendHealthFrame();
+        }
     }
 }
 
@@ -177,10 +228,12 @@ void MQTT_Task(void *pvParameters) {
             // UNIFIED FORMAT: timestamp,id,data
             sprintf(payload, "%lu,%X,%s", msg.timestamp, msg.id, hexData);
             
-            mqtt.publish(mqtt_topic, payload);
+            if (!mqtt.publish(mqtt_topic, payload)) {
+                rearMqttPublishFailures++;
+            }
             count++;
         }
-        
+
         // Yield to let IDLE tasks run and watchdog kick
         vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -235,6 +288,7 @@ void CAN_RX_Task(void *pvParameters) {
             memcpy(log.data, rxMsg.data, rxMsg.data_length_code);
             
             if (xQueueSend(mqttQueue, &log, pdMS_TO_TICKS(5)) != pdTRUE) {
+                rearMqttQueueDrops++;
                 Serial.println("Error: MQTT queue is full, dropping CAN message!");
             }
         } 

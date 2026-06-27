@@ -27,4 +27,9 @@
 
 #define CAN_ID_LAPTIME        0x900 // laptime
 
+// ================================================================
+// SYSTEM HEALTH
+// ================================================================
+#define CAN_ID_SYSTEM_HEALTH  0xA00 // Data: [Node, Flags, Drop_H, Drop_L, Fail_H, Fail_L, QueueFree, Heartbeat]
+
 #endif
