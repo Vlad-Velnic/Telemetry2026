@@ -22,14 +22,14 @@
 #define CAN_ID_REAR_ANALOG    0x701 // Data: [RL_H, RL_L, RR_H, RR_L, BRK_H, BRK_L]
 
 // GPS (Split into 2 frames because floats are 4 bytes each)
-#define CAN_ID_GPS_POS        0x800 // Data: [Lat_B0..B3, Lon_B0..B3]
-#define CAN_ID_GPS_SPD        0x801 // Data: [Spd_B0..B3, 0, 0, 0, 0]
+#define CAN_ID_GPS_POS        0x750 // Data: [Lat_B0..B3, Lon_B0..B3]
+#define CAN_ID_GPS_SPD        0x751 // Data: [Spd_B0..B3, 0, 0, 0, 0]
 
-#define CAN_ID_LAPTIME        0x900 // laptime calculation
+#define CAN_ID_LAPTIME        0x777 // Data: [LapTimeMs_B3, LapTimeMs_B2, LapTimeMs_B1, LapTimeMs_B0]
 
 // ================================================================
 // SYSTEM HEALTH
 // ================================================================
-#define CAN_ID_SYSTEM_HEALTH  0xA00 // Data: [Node, Flags, Drop_H, Drop_L, Fail_H, Fail_L, QueueFree, Heartbeat]
+#define CAN_ID_SYSTEM_HEALTH  0x7FF // Data: [Node, Flags, Drop_H, Drop_L, Fail_H, Fail_L, QueueFree, Heartbeat]
 
 #endif

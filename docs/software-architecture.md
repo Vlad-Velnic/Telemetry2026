@@ -20,7 +20,7 @@ flowchart LR
     end
 
     subgraph Front["Front-Module ESP32"]
-        FLoop["20 Hz main loop<br/>front analog + accelerometer sampling"]
+        FLoop["25 Hz main loop<br/>front analog + IMU sampling"]
         FCANRX["CAN_Task<br/>high-priority CAN receive"]
         FSD["SD_Task<br/>queued batch logging"]
         FOLED["10 Hz display update"]
@@ -28,7 +28,7 @@ flowchart LR
     end
 
     subgraph Rear["Rear-Module ESP32 / A7670"]
-        RSensors["Sensor_Task<br/>20 Hz rear/brake/gear sampling"]
+        RSensors["Sensor_Task<br/>25 Hz rear/brake/gear sampling"]
         RCANRX["CAN_RX_Task<br/>CAN to MQTT queue"]
         RModem["MQTT_Task<br/>LTE, MQTT, GPS at lower priority"]
         RQueue["mqttQueue<br/>TelemetryMessage buffer"]
@@ -53,7 +53,7 @@ flowchart LR
     RSensors -->|CAN_ID_REAR_ANALOG 0x701<br/>CAN_ID_GEAR 0x700| CAN
     RSensors --> RQueue
     GPS --> RModem
-    RModem -->|CAN_ID_GPS_POS 0x800<br/>CAN_ID_GPS_SPD 0x801| CAN
+    RModem -->|CAN_ID_GPS_POS 0x750<br/>CAN_ID_GPS_SPD 0x751| CAN
     RModem --> RQueue
     CAN --> RCANRX --> RQueue
     RQueue --> RModem --> Broker --> Viewer
@@ -65,7 +65,7 @@ flowchart LR
 
 Location: `Front-Module/`
 
-- `src/main.cpp`: initializes the front module and runs the 20 Hz main sampling loop.
+- `src/main.cpp`: initializes the front module and runs the 25 Hz main sampling loop.
 - `src/setup.cpp`: initializes GPIO, SD card, OLED display, MPU6050 IMU, and ESP32 TWAI CAN.
 - `src/loop.cpp`: implements CAN transmission, CAN reception, SD logging, and display update logic.
 - `include/canIDs.h`: defines the shared CAN message identifiers used by both front and rear modules.
@@ -73,7 +73,7 @@ Location: `Front-Module/`
 
 Responsibilities:
 
-- Samples front damper and steering analog channels at 20 Hz.
+- Samples front damper and steering analog channels at 25 Hz.
 - Samples MPU6050 acceleration data and broadcasts it on CAN.
 - Receives all CAN traffic and logs it through a FreeRTOS queue.
 - Updates the driver-facing OLED display at 10 Hz.
@@ -91,7 +91,7 @@ Location: `Rear-Module/`
 
 Responsibilities:
 
-- Samples rear dampers, brake pressure, and gear switches at 20 Hz.
+- Samples rear dampers, brake pressure, and gear switches at 25 Hz.
 - Receives CAN traffic from the rest of the vehicle.
 - Publishes telemetry to MQTT using LTE.
 - Reads GNSS position/speed at a lower rate so GPS/modem latency does not block sensor sampling.
@@ -107,7 +107,7 @@ Responsibilities:
 
 - Connects to `broker.hivemq.com` on topic `tuiracing`.
 - Parses messages in `timestamp,id,data` format.
-- Decodes known CAN IDs into engineering values for RPM, gear, temperatures, battery voltage, damper positions, brake pressure, acceleration, GPS position, and speed.
+- Decodes known CAN IDs into engineering values for RPM, gear, temperatures, battery voltage, damper positions, brake pressure, acceleration, gyroscope, GPS position/speed, and lap time.
 - Highlights stale data for selected critical values.
 
 ## Interfaces
@@ -120,19 +120,20 @@ The CAN bus is the primary in-vehicle telemetry interface. Both ESP32 modules us
 | --- | --- | --- |
 | `0x500` | Front module | Front damper 1, front damper 2, steering |
 | `0x501` | Front module | Accelerometer X/Y/Z |
-| `0x502` | Reserved/front module | Gyroscope X/Y/Z |
+| `0x502` | Front module | Gyroscope X/Y/Z |
 | `0x600` | Engine ECU | RPM |
 | `0x601` | Engine ECU | Battery voltage |
 | `0x602` | Engine ECU | Water temperature |
 | `0x700` | Rear module | Gear |
 | `0x701` | Rear module | Rear left damper, rear right damper, brake pressure |
-| `0x800` | Rear module | GPS latitude and longitude |
-| `0x801` | Rear module | GPS speed |
-| `0x900` | Reserved | Lap time |
+| `0x750` | Rear module | GPS latitude and longitude |
+| `0x751` | Rear module | GPS speed in km/h |
+| `0x777` | Rear module | Lap time in milliseconds |
+| `0x7FF` | Front/rear modules | System health |
 
 ### MQTT telemetry
 
-The rear module publishes telemetry using the same payload format used by the SD logger:
+Each MQTT record uses the same payload format as the SD logger:
 
 ```text
 timestamp,id,data
@@ -145,6 +146,9 @@ Example:
 ```
 
 This format keeps cloud telemetry aligned with CAN and SD logging, making debug traces easier to compare.
+To reduce cellular modem command overhead, one MQTT publication may contain up
+to six records separated by semicolons. The dashboard decodes every record in
+the batch.
 
 ### SD logging
 
@@ -159,13 +163,13 @@ The architecture separates time-sensitive vehicle data handling from slower or f
 - Sensor sampling and CAN reception are independent FreeRTOS tasks or timed loops.
 - SD card writes are handled through `canQueue` instead of being performed directly in the CAN receive path.
 - MQTT, LTE, and GPS processing run in a lower-priority rear-module task.
-- Driver display updates run at 10 Hz instead of blocking the 20 Hz acquisition loop.
+- Driver display updates run at 10 Hz instead of blocking the 25 Hz acquisition loop.
 
 This prevents slow storage, display, network, or GPS operations from directly blocking the acquisition of vehicle state data.
 
 ### Deterministic timing
 
-The front module uses a 20 Hz loop period for front analog/IMU sampling and a separate 10 Hz display period. The rear module uses a 20 Hz `Sensor_Task` with `vTaskDelayUntil`, while GPS and MQTT are processed in a lower-priority task. This creates predictable acquisition timing for chassis and brake telemetry.
+The front module uses a 25 Hz loop period for front analog/IMU sampling and a separate 10 Hz display period. The rear module uses a 25 Hz `Sensor_Task` with `vTaskDelayUntil`, while GPS and MQTT are processed in a lower-priority task. This creates predictable acquisition timing for chassis and brake telemetry.
 
 ### Queue-based buffering
 
@@ -184,7 +188,7 @@ The system is designed to continue operating with partial functionality:
 - If MQTT is disconnected, the rear module retries without stopping the sensor task.
 - If the SD card fails to initialize, the front module still initializes display, IMU, and CAN.
 - If GNSS has no valid fix, invalid GPS frames are not broadcast.
-- Display status flags can indicate missing rear, Wi-Fi, or ECU data.
+- Display status flags can indicate missing rear-module, GPS, or ECU data.
 
 ### Traceability and diagnostics
 
@@ -198,7 +202,7 @@ The telemetry project currently observes and distributes state; it does not dire
 
 Our approach to software functional safety and robustness is based on separating safety-critical control from telemetry and then ensuring the telemetry software cannot block or destabilize vehicle state acquisition. The telemetry architecture is distributed across two ESP32-based modules connected to the vehicle CAN bus. The front module samples front chassis sensors and the IMU, receives all CAN traffic, logs it to an SD card, and updates the driver OLED. The rear module samples rear suspension, brake pressure, gear position, GPS, and bridges CAN telemetry to an MQTT link for remote visualization. Engine information such as RPM, voltage, and water temperature is received from the ECU over CAN.
 
-Time-critical functions are isolated from slow peripherals using FreeRTOS tasks, fixed-rate loops, and message queues. Sensor acquisition runs at 20 Hz, CAN reception is handled in dedicated high-priority tasks, and slower operations such as SD writes, LTE/MQTT upload, GPS parsing, and OLED updates are decoupled. The front module logs through a `canQueue`, while the rear module uses an `mqttQueue`, so temporary delays in storage or communications do not immediately block CAN reception or sensor sampling.
+Time-critical functions are isolated from slow peripherals using FreeRTOS tasks, fixed-rate loops, and message queues. Sensor acquisition runs at 25 Hz, CAN reception is handled in dedicated high-priority tasks, and slower operations such as SD writes, LTE/MQTT upload, GPS parsing, and OLED updates are decoupled. The front module logs through a `canQueue`, while the rear module uses an `mqttQueue`, so temporary delays in storage or communications do not immediately block CAN reception or sensor sampling.
 
 The software also supports graceful degradation. If the LTE modem, MQTT broker, GPS fix, or SD card is unavailable, the remaining local telemetry functions continue. Raw CAN data is stored or transmitted in a consistent `timestamp,id,data` format, which improves traceability and allows post-run verification. The driver display shows the most relevant vehicle state values and can indicate missing subsystems.
 

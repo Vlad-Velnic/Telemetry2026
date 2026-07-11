@@ -41,9 +41,9 @@ void setupModem() {
     SerialAT.begin(115200, SERIAL_8N1, MODEM_RX, MODEM_TX);
 
     // Power Cycle Sequence
-    digitalWrite(MODEM_PWRKEY, LOW); delay(1000);
-    digitalWrite(MODEM_PWRKEY, HIGH); delay(2000);
-    //digitalWrite(MODEM_PWRKEY, LOW);
+    digitalWrite(MODEM_PWRKEY, LOW); delay(100);
+    digitalWrite(MODEM_PWRKEY, HIGH); delay(1000);
+    digitalWrite(MODEM_PWRKEY, LOW); delay(2000);
 
     // Wait for AT Ready
     bool modemReady = false;
@@ -83,6 +83,7 @@ void setupModem() {
 
 void setupMQTT() {
     mqtt.setServer(mqtt_server, 1883);
+    mqtt.setSocketTimeout(2);
     // Callback can be added here if we need to receive commands
 }
 
@@ -135,9 +136,14 @@ void setupOTA() {
 #endif
 
 void setupCAN() {
+    rearCanReady = false;
     DEBUG_PRINTLN("Initializing CAN...");
     
     twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)PIN_CAN_TX, (gpio_num_t)PIN_CAN_RX, TWAI_MODE_NORMAL);
+    g_config.tx_queue_len = 16;
+    g_config.rx_queue_len = 32;
+    g_config.alerts_enabled = TWAI_ALERT_BUS_OFF | TWAI_ALERT_BUS_RECOVERED |
+                              TWAI_ALERT_RX_QUEUE_FULL | TWAI_ALERT_TX_FAILED;
     twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
     twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
@@ -149,6 +155,7 @@ void setupCAN() {
     }
 
     if (twai_start() == ESP_OK) {
+        rearCanReady = true;
         DEBUG_PRINTLN("CAN Started");
     } else {
         DEBUG_PRINTLN("CAN Start FAILED");

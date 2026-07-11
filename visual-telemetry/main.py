@@ -19,10 +19,10 @@ CAN_ID_VOLTAGE      = 0x601
 CAN_ID_WATER_TEMP   = 0x602
 CAN_ID_GEAR         = 0x700
 CAN_ID_REAR_ANALOG  = 0x701
-CAN_ID_GPS_POS      = 0x800
-CAN_ID_GPS_SPD      = 0x801
-CAN_ID_LAPTIME      = 0x900
-CAN_ID_SYSTEM_HEALTH = 0xA00
+CAN_ID_GPS_POS      = 0x750
+CAN_ID_GPS_SPD      = 0x751
+CAN_ID_LAPTIME      = 0x777
+CAN_ID_SYSTEM_HEALTH = 0x7FF
 
 HEALTH_NODE_FRONT = 1
 HEALTH_NODE_REAR = 2
@@ -50,6 +50,8 @@ class TelemetryApp:
             "D1": 0, "D2": 0, "STR": 0,
             "RL": 0, "RR": 0, "BRK": 0,
             "AX": 0.0, "AY": 0.0, "AZ": 0.0,
+            "GX": 0.0, "GY": 0.0, "GZ": 0.0,
+            "LAP_MS": 0,
             "LAST_MSG": "None", "MSG_COUNT": 0
         }
         self.health = {
@@ -63,12 +65,15 @@ class TelemetryApp:
             }
         }
         self.last_seen = {}
+        self.data_lock = threading.Lock()
+        self.mqtt_status = "Connecting to MQTT..."
 
         self.setup_ui()
         
         # MQTT Setup
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         self.client.on_connect = self.on_connect
+        self.client.on_disconnect = self.on_disconnect
         self.client.on_message = self.on_message
         
         self.mqtt_thread = threading.Thread(target=self.run_mqtt, daemon=True)
@@ -117,6 +122,8 @@ class TelemetryApp:
         self.lbl_spd = self.create_val_label(gps_frame, "Speed:", "0.0 km/h", row=0, col=0)
         self.lbl_coords = self.create_val_label(gps_frame, "Coords:", "0.0, 0.0", row=1, col=0)
         self.lbl_accel = self.create_val_label(gps_frame, "Accel (XYZ):", "0, 0, 0", row=2, col=0)
+        self.lbl_gyro = self.create_val_label(gps_frame, "Gyro (XYZ):", "0, 0, 0", row=3, col=0)
+        self.lbl_lap = self.create_val_label(gps_frame, "Last lap:", "--:--.-", row=4, col=0)
 
         # 5. SYSTEM HEALTH
         health_frame = ttk.LabelFrame(main_container, text=" SYSTEM HEALTH ", padding=10)
@@ -148,19 +155,37 @@ class TelemetryApp:
         return val_lbl
 
     def run_mqtt(self):
-        try:
-            self.client.connect(BROKER, PORT, 60)
-            self.client.loop_forever()
-        except Exception as e:
-            self.status_var.set(f"MQTT Error: {e}")
+        while True:
+            try:
+                self.mqtt_status = f"Connecting to {BROKER}..."
+                self.client.connect(BROKER, PORT, 60)
+                self.client.loop_forever()
+            except Exception as e:
+                self.mqtt_status = f"MQTT error: {e}; retrying"
+                time.sleep(5)
 
     def on_connect(self, client, userdata, flags, rc, properties):
-        self.status_var.set(f"Connected to {BROKER}")
-        client.subscribe(TOPIC)
+        if rc == 0:
+            self.mqtt_status = f"Connected to {BROKER}"
+            client.subscribe(TOPIC)
+        else:
+            self.mqtt_status = f"MQTT connection refused: {rc}"
+
+    def on_disconnect(self, client, userdata, disconnect_flags, rc, properties):
+        self.mqtt_status = f"Disconnected ({rc}); reconnecting"
 
     def on_message(self, client, userdata, msg):
         try:
-            payload = msg.payload.decode('utf-8')
+            records = msg.payload.decode('utf-8').split(';')
+        except UnicodeDecodeError as e:
+            self.mqtt_status = f"Bad telemetry packet: {e}"
+            return
+
+        for payload in records:
+            self.process_payload(payload)
+
+    def process_payload(self, payload):
+        try:
             parts = payload.split(',')
             if len(parts) < 3: return
 
@@ -168,84 +193,116 @@ class TelemetryApp:
             hex_data = parts[2]
             raw_data = bytes.fromhex(hex_data)
             
-            self.last_seen[can_id] = time.time()
-            self.data["MSG_COUNT"] += 1
+            with self.data_lock:
+                self.last_seen[can_id] = time.time()
+                self.data["MSG_COUNT"] += 1
 
-            # Parsing Logic
-            if can_id == CAN_ID_RPM and len(raw_data) >= 2:
-                self.data["RPM"] = (raw_data[0] << 8) | raw_data[1]
-            elif can_id == CAN_ID_GEAR and len(raw_data) >= 1:
-                g = raw_data[0]
-                self.data["GEAR"] = "N" if g == 0 else str(g)
-            elif can_id == CAN_ID_VOLTAGE and len(raw_data) >= 1:
-                self.data["BATT"] = raw_data[0] / 10.0
-            elif can_id == CAN_ID_WATER_TEMP and len(raw_data) >= 1:
-                self.data["TEMP"] = raw_data[0]
-            elif can_id == CAN_ID_FRONT_ANALOG and len(raw_data) >= 6:
-                self.data["D1"] = (raw_data[0] << 8) | raw_data[1]
-                self.data["D2"] = (raw_data[2] << 8) | raw_data[3]
-                self.data["STR"] = (raw_data[4] << 8) | raw_data[5]
-            elif can_id == CAN_ID_REAR_ANALOG and len(raw_data) >= 6:
-                self.data["RL"] = (raw_data[0] << 8) | raw_data[1]
-                self.data["RR"] = (raw_data[2] << 8) | raw_data[3]
-                self.data["BRK"] = (raw_data[4] << 8) | raw_data[5]
-            elif can_id == CAN_ID_ACCEL and len(raw_data) >= 6:
-                # Use struct to parse signed 16-bit integers (Big Endian)
-                ax, ay, az = struct.unpack(">hhh", raw_data[:6])
-                self.data["AX"], self.data["AY"], self.data["AZ"] = ax/100.0, ay/100.0, az/100.0
-            elif can_id == CAN_ID_GPS_POS and len(raw_data) >= 8:
-                # Floats are Little Endian from ESP32 memcpy
-                lat, lon = struct.unpack("<ff", raw_data[:8])
-                self.data["LAT"], self.data["LON"] = lat, lon
-            elif can_id == CAN_ID_GPS_SPD and len(raw_data) >= 4:
-                spd = struct.unpack("<f", raw_data[:4])[0]
-                self.data["SPD"] = spd
-            elif can_id == CAN_ID_SYSTEM_HEALTH and len(raw_data) >= 8:
-                node = raw_data[0]
-                module = "FRONT" if node == HEALTH_NODE_FRONT else "REAR" if node == HEALTH_NODE_REAR else None
+                # Parsing Logic
+                if can_id == CAN_ID_RPM and len(raw_data) >= 2:
+                    self.data["RPM"] = (raw_data[0] << 8) | raw_data[1]
+                elif can_id == CAN_ID_GEAR and len(raw_data) >= 1:
+                    g = raw_data[0]
+                    self.data["GEAR"] = "N" if g == 0 else str(g)
+                elif can_id == CAN_ID_VOLTAGE and len(raw_data) >= 1:
+                    self.data["BATT"] = raw_data[0] / 10.0
+                elif can_id == CAN_ID_WATER_TEMP and len(raw_data) >= 1:
+                    self.data["TEMP"] = raw_data[0]
+                elif can_id == CAN_ID_FRONT_ANALOG and len(raw_data) >= 6:
+                    self.data["D1"] = (raw_data[0] << 8) | raw_data[1]
+                    self.data["D2"] = (raw_data[2] << 8) | raw_data[3]
+                    self.data["STR"] = (raw_data[4] << 8) | raw_data[5]
+                elif can_id == CAN_ID_REAR_ANALOG and len(raw_data) >= 6:
+                    self.data["RL"] = (raw_data[0] << 8) | raw_data[1]
+                    self.data["RR"] = (raw_data[2] << 8) | raw_data[3]
+                    self.data["BRK"] = (raw_data[4] << 8) | raw_data[5]
+                elif can_id == CAN_ID_ACCEL and len(raw_data) >= 6:
+                    ax, ay, az = struct.unpack(">hhh", raw_data[:6])
+                    self.data["AX"], self.data["AY"], self.data["AZ"] = ax/100.0, ay/100.0, az/100.0
+                elif can_id == CAN_ID_GYRO and len(raw_data) >= 6:
+                    gx, gy, gz = struct.unpack(">hhh", raw_data[:6])
+                    self.data["GX"], self.data["GY"], self.data["GZ"] = gx/100.0, gy/100.0, gz/100.0
+                elif can_id == CAN_ID_GPS_POS and len(raw_data) >= 8:
+                    lat, lon = struct.unpack("<ff", raw_data[:8])
+                    self.data["LAT"], self.data["LON"] = lat, lon
+                elif can_id == CAN_ID_GPS_SPD and len(raw_data) >= 4:
+                    self.data["SPD"] = struct.unpack("<f", raw_data[:4])[0]
+                elif can_id == CAN_ID_LAPTIME and len(raw_data) >= 4:
+                    self.data["LAP_MS"] = struct.unpack(">I", raw_data[:4])[0]
+                elif can_id == CAN_ID_SYSTEM_HEALTH and len(raw_data) >= 8:
+                    node = raw_data[0]
+                    module = "FRONT" if node == HEALTH_NODE_FRONT else "REAR" if node == HEALTH_NODE_REAR else None
 
-                if module:
-                    self.health[module]["flags"] = raw_data[1]
-                    self.health[module]["drops"] = (raw_data[2] << 8) | raw_data[3]
-                    self.health[module]["failures"] = (raw_data[4] << 8) | raw_data[5]
-                    self.health[module]["queue_free"] = raw_data[6]
-                    self.health[module]["heartbeat"] = raw_data[7]
-                    self.health[module]["last_seen"] = time.time()
+                    if module:
+                        self.health[module]["flags"] = raw_data[1]
+                        self.health[module]["drops"] = (raw_data[2] << 8) | raw_data[3]
+                        self.health[module]["failures"] = (raw_data[4] << 8) | raw_data[5]
+                        self.health[module]["queue_free"] = raw_data[6]
+                        self.health[module]["heartbeat"] = raw_data[7]
+                        self.health[module]["last_seen"] = time.time()
 
         except Exception as e:
-            pass
+            self.mqtt_status = f"Bad telemetry packet: {e}"
 
     def update_gui_loop(self):
+        with self.data_lock:
+            data = self.data.copy()
+            last_seen = self.last_seen.copy()
+
         # Update Labels from Storage
-        self.lbl_rpm.config(text=f"{self.data['RPM']}")
-        self.lbl_gear.config(text=f"{self.data['GEAR']}")
-        self.lbl_temp.config(text=f"{self.data['TEMP']}°C")
-        self.lbl_batt.config(text=f"{self.data['BATT']:.1f}V")
+        self.lbl_rpm.config(text=f"{data['RPM']}")
+        self.lbl_gear.config(text=f"{data['GEAR']}")
+        self.lbl_temp.config(text=f"{data['TEMP']}°C")
+        self.lbl_batt.config(text=f"{data['BATT']:.1f}V")
         
-        self.lbl_d1.config(text=f"{self.data['D1']}")
-        self.lbl_d2.config(text=f"{self.data['D2']}")
-        self.lbl_str.config(text=f"{self.data['STR']}")
+        self.lbl_d1.config(text=f"{data['D1']}")
+        self.lbl_d2.config(text=f"{data['D2']}")
+        self.lbl_str.config(text=f"{data['STR']}")
         
-        self.lbl_rl.config(text=f"{self.data['RL']}")
-        self.lbl_rr.config(text=f"{self.data['RR']}")
-        self.lbl_brk.config(text=f"{self.data['BRK']}")
+        self.lbl_rl.config(text=f"{data['RL']}")
+        self.lbl_rr.config(text=f"{data['RR']}")
+        self.lbl_brk.config(text=f"{data['BRK']}")
         
-        self.lbl_spd.config(text=f"{self.data['SPD']:.1f} km/h")
-        self.lbl_coords.config(text=f"{self.data['LAT']:.6f}, {self.data['LON']:.6f}")
-        self.lbl_accel.config(text=f"{self.data['AX']:.2f}, {self.data['AY']:.2f}, {self.data['AZ']:.2f}")
+        self.lbl_spd.config(text=f"{data['SPD']:.1f} km/h")
+        self.lbl_coords.config(text=f"{data['LAT']:.6f}, {data['LON']:.6f}")
+        self.lbl_accel.config(text=f"{data['AX']:.2f}, {data['AY']:.2f}, {data['AZ']:.2f}")
+        self.lbl_gyro.config(text=f"{data['GX']:.2f}, {data['GY']:.2f}, {data['GZ']:.2f}")
+        lap_ms = data["LAP_MS"]
+        if lap_ms:
+            self.lbl_lap.config(text=f"{lap_ms // 60000}:{(lap_ms // 1000) % 60:02d}.{(lap_ms // 100) % 10}")
 
         self.update_health_labels()
 
         # Update status bar with packet count
-        self.status_var.set(f"Connected | Packets: {self.data['MSG_COUNT']} | Broker: {BROKER}")
+        self.status_var.set(f"{self.mqtt_status} | Packets: {data['MSG_COUNT']}")
 
         # Highlight if data is stale
         now = time.time()
-        for cid, lbl in [(CAN_ID_RPM, self.lbl_rpm), (CAN_ID_GPS_SPD, self.lbl_spd)]:
-            if cid in self.last_seen and now - self.last_seen[cid] > 2.0:
+        stale_labels = [
+            (CAN_ID_RPM, self.lbl_rpm),
+            (CAN_ID_VOLTAGE, self.lbl_batt),
+            (CAN_ID_WATER_TEMP, self.lbl_temp),
+            (CAN_ID_GEAR, self.lbl_gear),
+            (CAN_ID_FRONT_ANALOG, self.lbl_d1),
+            (CAN_ID_FRONT_ANALOG, self.lbl_d2),
+            (CAN_ID_FRONT_ANALOG, self.lbl_str),
+            (CAN_ID_REAR_ANALOG, self.lbl_rl),
+            (CAN_ID_REAR_ANALOG, self.lbl_rr),
+            (CAN_ID_REAR_ANALOG, self.lbl_brk),
+            (CAN_ID_ACCEL, self.lbl_accel),
+            (CAN_ID_GYRO, self.lbl_gyro),
+            (CAN_ID_GPS_SPD, self.lbl_spd),
+            (CAN_ID_GPS_POS, self.lbl_coords),
+        ]
+        for cid, lbl in stale_labels:
+            timeout = 3.0 if cid in (CAN_ID_GPS_SPD, CAN_ID_GPS_POS) else 2.0
+            if cid not in last_seen or now - last_seen[cid] > timeout:
                 lbl.config(foreground="orange")
             else:
                 lbl.config(foreground="#00ff00")
+
+        self.lbl_lap.config(
+            foreground="#00ff00" if CAN_ID_LAPTIME in last_seen else "orange"
+        )
 
         self.root.after(100, self.update_gui_loop)
 
@@ -257,11 +314,11 @@ class TelemetryApp:
 
         self.lbl_front_health.config(
             text=self.format_health("FRONT", front, now),
-            foreground=self.health_color(front, now)
+            foreground=self.health_color("FRONT", front, now)
         )
         self.lbl_rear_health.config(
             text=self.format_health("REAR", rear, now),
-            foreground=self.health_color(rear, now)
+            foreground=self.health_color("REAR", rear, now)
         )
 
     def format_health(self, module, health, now):
@@ -272,9 +329,13 @@ class TelemetryApp:
         stale = " STALE" if age > 7.0 else ""
 
         if module == "FRONT":
+            flags = health["flags"]
+            can_state = "CAN FAIL" if flags & 0x02 else "CAN OK"
+            sd_state = "SD FAIL" if flags & 0x04 else "SD OK"
             return (
                 f"Drops {health['drops']} | CAN fail {health['failures']} | "
-                f"Q free {health['queue_free']} | HB {health['heartbeat']}{stale}"
+                f"Q free {health['queue_free']} | {can_state} | {sd_state} | "
+                f"HB {health['heartbeat']}{stale}"
             )
 
         flags = health["flags"]
@@ -288,12 +349,14 @@ class TelemetryApp:
             f"HB {health['heartbeat']}{stale}"
         )
 
-    def health_color(self, health, now):
+    def health_color(self, module, health, now):
         if health["last_seen"] == 0:
             return "#aaaaaa"
         if now - health["last_seen"] > 7.0:
             return "orange"
-        if health["drops"] > 0 or health["failures"] > 0:
+        if (health["drops"] > 0 or health["failures"] > 0 or
+                health["flags"] & 0x07 or
+                (module == "REAR" and not health["flags"] & 0x08)):
             return "#ff5555"
         return "#00ff00"
 

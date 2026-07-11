@@ -5,12 +5,12 @@ void broadcastData(uint32_t id, uint8_t* data, size_t len) {
     if (len > 8) len = 8;
 
     // 1. Physically send on the CAN bus
-    twai_message_t txMsg;
+    twai_message_t txMsg = {};
     txMsg.identifier = id;
     txMsg.extd = 0;
     txMsg.data_length_code = len;
     memcpy(txMsg.data, data, len);
-    if (twai_transmit(&txMsg, pdMS_TO_TICKS(5)) != ESP_OK) {
+    if (!frontCanReady || twai_transmit(&txMsg, pdMS_TO_TICKS(5)) != ESP_OK) {
         frontCanTxFailures++;
     }
 
@@ -22,7 +22,7 @@ void broadcastData(uint32_t id, uint8_t* data, size_t len) {
     log.isRx = false; // Message sent locally
     memcpy(log.data, data, len);
     
-    if (xQueueSend(canQueue, &log, 0) != pdTRUE) {
+    if (!canQueue || xQueueSend(canQueue, &log, 0) != pdTRUE) {
         frontCanQueueDrops++;
     }
 }
@@ -40,7 +40,8 @@ void sendHealthFrame() {
     uint8_t flags = 0;
 
     if (frontCanQueueDrops > 0) flags |= 0x01;
-    if (frontCanTxFailures > 0) flags |= 0x02;
+    if (!frontCanReady) flags |= 0x02;
+    if (!frontSdReady) flags |= 0x04;
 
     uint8_t healthMsg[8] = {
         HEALTH_NODE_FRONT,
@@ -62,31 +63,74 @@ void CAN_Task(void *pvParameters) {
     LogMessage log;
 
     while (1) {
-        if (twai_receive(&rxMsg, portMAX_DELAY) == ESP_OK) {
+        const esp_err_t receiveResult = twai_receive(&rxMsg, pdMS_TO_TICKS(100));
+
+        uint32_t alerts = 0;
+        if (twai_read_alerts(&alerts, 0) == ESP_OK) {
+            if (alerts & TWAI_ALERT_RX_QUEUE_FULL) frontCanQueueDrops++;
+            if (alerts & TWAI_ALERT_TX_FAILED) frontCanTxFailures++;
+            if (alerts & TWAI_ALERT_BUS_OFF) {
+                frontCanReady = false;
+                if (twai_initiate_recovery() != ESP_OK) frontCanTxFailures++;
+            }
+            if (alerts & TWAI_ALERT_BUS_RECOVERED) {
+                if (twai_start() == ESP_OK) frontCanReady = true;
+            }
+        }
+
+        if (receiveResult == ESP_OK) {
+            // This project uses only standard Classical-CAN data frames.
+            if (rxMsg.extd || rxMsg.rtr || rxMsg.dlc_non_comp ||
+                rxMsg.data_length_code > 8) {
+                frontCanQueueDrops++;
+                continue;
+            }
+            const unsigned long rxTimestamp = millis();
             
             // 1. Log EVERYTHING received
             log.id = rxMsg.identifier;
             log.len = rxMsg.data_length_code;
-            log.timestamp = millis();
+            log.timestamp = rxTimestamp;
             log.isRx = true;
             memcpy(log.data, rxMsg.data, rxMsg.data_length_code);
             if (xQueueSend(canQueue, &log, 0) != pdTRUE) {
                 frontCanQueueDrops++;
             }
 
+            // Track every required signal independently so one live frame
+            // cannot hide a different stale ECU/rear signal.
+            if (rxMsg.identifier == CAN_ID_RPM && rxMsg.data_length_code >= 2)
+                lastRpmCanRxMs = rxTimestamp;
+            if (rxMsg.identifier == CAN_ID_VOLTAGE && rxMsg.data_length_code >= 1)
+                lastVoltageCanRxMs = rxTimestamp;
+            if (rxMsg.identifier == CAN_ID_WATER_TEMP && rxMsg.data_length_code >= 1)
+                lastWaterTempCanRxMs = rxTimestamp;
+            if (rxMsg.identifier == CAN_ID_GEAR && rxMsg.data_length_code >= 1)
+                lastGearCanRxMs = rxTimestamp;
+            if (rxMsg.identifier == CAN_ID_REAR_ANALOG && rxMsg.data_length_code >= 6)
+                lastRearAnalogCanRxMs = rxTimestamp;
+            if (rxMsg.identifier == CAN_ID_GPS_POS && rxMsg.data_length_code >= 8) {
+                lastGpsPositionCanRxMs = rxTimestamp;
+            }
+
             // 2. Update Display Variables (Only if relevant)
             if (rxMsg.identifier == CAN_ID_RPM && rxMsg.data_length_code >= 2) {
                 currentRPM = (rxMsg.data[0] << 8) | rxMsg.data[1];
             }
-            else if (rxMsg.identifier == CAN_ID_VOLTAGE) {
+            else if (rxMsg.identifier == CAN_ID_VOLTAGE && rxMsg.data_length_code >= 1) {
                 currentBat = (float)rxMsg.data[0] / 10.0;
             }
-            else if (rxMsg.identifier == CAN_ID_WATER_TEMP) {
+            else if (rxMsg.identifier == CAN_ID_WATER_TEMP && rxMsg.data_length_code >= 1) {
                 currentTemp = (float)rxMsg.data[0];
             }
-            else if (rxMsg.identifier == CAN_ID_GEAR) {
+            else if (rxMsg.identifier == CAN_ID_GEAR && rxMsg.data_length_code >= 1) {
                 currentGear = rxMsg.data[0];
             }
+            else if (rxMsg.identifier == CAN_ID_LAPTIME && rxMsg.data_length_code >= 4) {
+                lastLapTime = ((uint32_t)rxMsg.data[0] << 24) | ((uint32_t)rxMsg.data[1] << 16) | ((uint32_t)rxMsg.data[2] << 8) | (uint32_t)rxMsg.data[3];
+            }
+        } else if (receiveResult != ESP_ERR_TIMEOUT) {
+            vTaskDelay(pdMS_TO_TICKS(100));
         }
     }
 }
@@ -95,17 +139,24 @@ void CAN_Task(void *pvParameters) {
 void SD_Task(void *pvParameters) {
     LogMessage msg;
     char hexData[20];
+    char line[64];
     const int BATCH_SIZE = 20; 
     int batchCount = 0;
+    unsigned long lastMountAttempt = 0;
 
-    // Wait for setupSD to set the filename
-    vTaskDelay(pdMS_TO_TICKS(1000));
-
-    File logFile = SD.open(logFileName, FILE_APPEND);
+    File logFile;
+    if (frontSdReady) logFile = SD.open(logFileName, FILE_APPEND);
 
     while (1) {
         if (xQueueReceive(canQueue, &msg, pdMS_TO_TICKS(500))) {
-            if (!logFile) logFile = SD.open(logFileName, FILE_APPEND);
+            if (!frontSdReady && millis() - lastMountAttempt >= 2000) {
+                lastMountAttempt = millis();
+                mountSDStorage();
+            }
+            if (frontSdReady && !logFile) {
+                logFile = SD.open(logFileName, FILE_APPEND);
+                if (!logFile) frontSdReady = false;
+            }
             
             if (logFile) {
                 // Convert data to Hex String
@@ -115,18 +166,46 @@ void SD_Task(void *pvParameters) {
                 }
 
                 // Format: timestamp, id, data
-                logFile.printf("%lu,%X,%s\n", msg.timestamp, msg.id, hexData);
+                const int lineLength = snprintf(line, sizeof(line), "%lu,%X,%s\n",
+                                                msg.timestamp, msg.id, hexData);
+                const bool writeOk = lineLength > 0 && lineLength < (int)sizeof(line) &&
+                                     logFile.write((const uint8_t *)line,
+                                                   (size_t)lineLength) == (size_t)lineLength;
+
+                if (!writeOk || logFile.getWriteError()) {
+                    frontSdWriteFailures++;
+                    logFile.close();
+                    SD.end();
+                    frontSdReady = false;
+                    batchCount = 0;
+                    continue;
+                }
 
                 batchCount++;
                 if (batchCount >= BATCH_SIZE) {
                     logFile.flush();
+                    if (logFile.getWriteError()) {
+                        frontSdWriteFailures++;
+                        logFile.close();
+                        SD.end();
+                        frontSdReady = false;
+                    }
                     batchCount = 0;
                 }
+            } else {
+                frontSdWriteFailures++;
             }
         } else {
             // Periodic flush if idle
             if (logFile) {
                 logFile.flush();
+                if (logFile.getWriteError()) {
+                    frontSdWriteFailures++;
+                    logFile.close();
+                    SD.end();
+                    frontSdReady = false;
+                    batchCount = 0;
+                }
             }
         }
     }
@@ -159,10 +238,10 @@ void updateDisplay(u_int8_t currentGear, unsigned long lastLapTime, float curren
     // Right side temp and voltage
     display.setTextSize(1);
 
-    if (NO_WIFI)
+    if (NO_GPS)
     {
         display.setCursor(55, 30);
-        display.printf("W");
+        display.printf("G");
     }
 
     if (NO_REAR)
@@ -174,7 +253,7 @@ void updateDisplay(u_int8_t currentGear, unsigned long lastLapTime, float curren
     if (NO_ECU)
     {
         display.setCursor(75, 30);
-        display.printf("M");
+        display.printf("E");
     }
 
     // Temperature
