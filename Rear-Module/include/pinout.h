@@ -8,8 +8,8 @@
 #define MODEM_POWER_ON      12
 
 // --- CAN BUS PINS (TWAI) ---
-#define PIN_CAN_TX          21
-#define PIN_CAN_RX          22
+#define PIN_CAN_TX          18
+#define PIN_CAN_RX          19
 
 // --- ANALOG SENSORS ---
 // Make sure these are ADC1 pins if using WiFi (ADC2 is restricted)

@@ -10,7 +10,7 @@ volatile bool otaReady = false;
 #endif
 
 // --- SETTINGS ---
-const char apn[] = "net";
+const char apn[] = "live.vodafone.com";
 const char user[] = "";
 const char pass[] = "";
 const char* mqtt_server = "broker.hivemq.com"; 

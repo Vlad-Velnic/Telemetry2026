@@ -36,7 +36,7 @@ constexpr int8_t PIN_MPU_SCL = GPIO_NUM_25;
 // ================================================================
 // CAN BUS (TJA1050)
 // ================================================================
-constexpr int8_t PIN_CAN_TX = GPIO_NUM_26;
-constexpr int8_t PIN_CAN_RX = GPIO_NUM_27;
+constexpr int8_t PIN_CAN_TX = GPIO_NUM_27;
+constexpr int8_t PIN_CAN_RX = GPIO_NUM_26;
 
 #endif

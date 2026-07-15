@@ -528,13 +528,12 @@ void sendHealthFrame() {
 }
 
 int getGear() {
-    // Returns 1-5 if a gear pin is active, otherwise neutral.
-    if (!digitalRead(PIN_GEAR_1)) return 1;
-    if (!digitalRead(PIN_GEAR_2)) return 2;
-    if (!digitalRead(PIN_GEAR_3)) return 3;
-    if (!digitalRead(PIN_GEAR_4)) return 4;
-    if (!digitalRead(PIN_GEAR_5)) return 5;
-    if (!digitalRead(PIN_GEAR_0)) return 0;
+    // Returns 1-6 if pin active, 0 if none (Neutral)
+    if (!digitalRead(PIN_GEAR_0)) return 1;
+    if (!digitalRead(PIN_GEAR_1)||!digitalRead(PIN_GEAR_2)) return 2;
+    if (!digitalRead(PIN_GEAR_3)||!digitalRead(PIN_GEAR_4)) return 3;
+    if (!digitalRead(PIN_GEAR_5)) return 4;
+    // if (!digitalRead(PIN_GEAR_0)) return 0;
     return 0;
 }
 
