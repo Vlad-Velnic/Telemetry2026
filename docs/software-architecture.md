@@ -14,7 +14,7 @@ flowchart LR
         CAN["500 kbit/s CAN bus<br/>Shared vehicle data interface"]
         FrontSensors["Front sensors<br/>FL/FR dampers, steering, MPU6050"]
         RearSensors["Rear sensors<br/>RL/RR dampers, brake pressure, gear switches"]
-        DriverDisplay["OLED driver display<br/>Gear, lap, GPS speed, brake bar, status"]
+        DriverDisplay["OLED driver display<br/>Gear, lap, GPS speed, status"]
         SD["SD card logger<br/>CSV CAN log"]
     end
 
@@ -98,7 +98,7 @@ Responsibilities:
 - Publishes telemetry to MQTT using LTE.
 - Reads atomic GNSS position/speed samples in a dedicated priority-3 task at the best supported 5, 2, or 1 Hz rate.
 - Re-broadcasts GPS data onto CAN for local logging and display consumers.
-- Runs LTE registration, PDP activation, MQTT connection, and reconnect as a priority-2 state machine.
+- Runs LTE registration, PDP activation, MQTT connection, and reconnect as a priority-4 state machine.
 - Serializes all post-start modem, TCP, and MQTT calls with one mutex and reserves the final 50 ms before each GPS deadline.
 - Publishes one policy-ordered MQTT batch every 200 ms without replaying continuous outage history.
 
@@ -112,7 +112,7 @@ Responsibilities:
 
 - Connects to `broker.hivemq.com` on topic `tuiracing`.
 - Parses messages in `timestamp,id,data` format.
-- Decodes known CAN IDs into gear, damper positions, brake pressure, acceleration, gyroscope, GPS position/speed, lap time, and module health.
+- Decodes known MQTT records into gear, acceleration, gyroscope, GPS position/speed, lap time, and module health.
 - Highlights stale data for selected critical values.
 
 ## Interfaces
@@ -148,20 +148,20 @@ Example:
 ```
 
 This format keeps cloud telemetry aligned with CAN and SD logging, making debug traces easier to compare.
-One MQTT publication is attempted every 200 ms. Records are separated by semicolons and ordered as lap, gear, GPS, analog, health, then IMU. PubSubClient uses a 512-byte packet buffer and the firmware limits its payload buffer to 480 bytes. The dashboard decodes every record in the batch.
+One MQTT publication is attempted every 200 ms. Records are separated by semicolons and ordered as lap, gear, GPS, health, then IMU. PubSubClient uses a 512-byte packet buffer and the firmware limits its payload buffer to 480 bytes. The dashboard decodes every record in the batch.
 
 | Signal | Local acquisition / CAN | MQTT policy |
 | --- | ---: | --- |
-| Front analog `0x500` | 25 Hz | 10 Hz queued samples |
+| Front analog `0x500` | 25 Hz | Not published |
 | Accelerometer `0x501` | 25 Hz | 5 Hz latest value |
 | Gyroscope `0x502` | 25 Hz | 5 Hz latest value |
 | Gear `0x700` | 25 Hz | Debounced transitions plus 1 Hz refresh |
-| Rear analog `0x701` | 25 Hz | 10 Hz queued samples |
+| Rear analog `0x701` | 25 Hz | Not published |
 | GPS `0x750/0x751` | Best supported 5/2/1 Hz | Every successful atomic sample while connected |
 | Lap `0x777` | Completed lap | Persistent latest value until publish succeeds |
 | Health `0x7FF` | 0.2 Hz per node | Latest value keyed by node |
 
-The fixed policy buffers contain two atomic GPS samples, four front analog samples, four rear analog samples, and four gear transitions. IMU and health use generation-protected latest-value slots. A disconnect clears continuous queues but retains current state and the latest lap; reconnect publishes one fresh snapshot.
+The fixed policy buffers contain two atomic GPS samples and four gear transitions. IMU and health use generation-protected latest-value slots. A disconnect clears continuous queues but retains current state and the latest lap; reconnect publishes one fresh snapshot. IDs `0x500` and `0x701` remain available on CAN for local consumers and SD logging but never enter MQTT buffering.
 
 ### SD logging
 
@@ -175,7 +175,7 @@ The architecture separates time-sensitive vehicle data handling from slower or f
 
 - Sensor sampling and CAN reception are independent FreeRTOS tasks or timed loops.
 - SD card writes are handled through `canQueue` instead of being performed directly in the CAN receive path.
-- GPS acquisition and LTE/MQTT processing run in separate priority-3 and priority-2 rear tasks.
+- GPS acquisition and LTE/MQTT processing run in separate priority-3 and priority-4 rear tasks.
 - Driver display updates run at 10 Hz instead of blocking the 25 Hz acquisition loop.
 
 This prevents slow storage, display, network, or GPS operations from directly blocking the acquisition of vehicle state data.
@@ -201,7 +201,7 @@ The system is designed to continue operating with partial functionality:
 - If MQTT is disconnected, the rear module retries without stopping the sensor task.
 - If the SD card fails to initialize, the front module still initializes display, IMU, and CAN.
 - If GNSS has no valid fix, invalid GPS frames are not broadcast.
-- Display status flags indicate stale rear-module or GPS data, and stale rear data forces the brake bar empty.
+- Display status flags indicate stale rear-module or GPS data.
 
 ### Traceability and diagnostics
 

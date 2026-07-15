@@ -11,11 +11,9 @@ TOPIC = "tuiracing"
 PORT = 1883
 
 # CAN IDs Mapping
-CAN_ID_FRONT_ANALOG = 0x500
 CAN_ID_ACCEL        = 0x501
 CAN_ID_GYRO         = 0x502
 CAN_ID_GEAR         = 0x700
-CAN_ID_REAR_ANALOG  = 0x701
 CAN_ID_GPS_POS      = 0x750
 CAN_ID_GPS_SPD      = 0x751
 CAN_ID_LAPTIME      = 0x777
@@ -43,8 +41,6 @@ class TelemetryApp:
         # Data Storage
         self.data = {
             "GEAR": "N", "SPD": 0.0, "LAT": 0.0, "LON": 0.0,
-            "D1": 0, "D2": 0, "STR": 0,
-            "RL": 0, "RR": 0, "BRK": 0,
             "AX": 0.0, "AY": 0.0, "AZ": 0.0,
             "GX": 0.0, "GY": 0.0, "GZ": 0.0,
             "LAP_MS": 0,
@@ -92,35 +88,19 @@ class TelemetryApp:
 
         self.lbl_gear = self.create_val_label(driver_frame, "GEAR:", "N", row=0, col=0)
         self.lbl_spd = self.create_val_label(driver_frame, "GPS SPEED:", "0.0 km/h", row=0, col=1)
-        self.lbl_brk = self.create_val_label(driver_frame, "BRAKE PRESS:", "0", row=0, col=2)
-        self.lbl_lap = self.create_val_label(driver_frame, "LAST LAP:", "--:--.-", row=0, col=3)
+        self.lbl_lap = self.create_val_label(driver_frame, "LAST LAP:", "--:--.-", row=0, col=2)
 
-        # 2. FRONT SENSORS
-        front_frame = ttk.LabelFrame(main_container, text=" FRONT SENSORS ", padding=10)
-        front_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
-
-        self.lbl_d1 = self.create_val_label(front_frame, "Damper FL:", "0", row=0, col=0)
-        self.lbl_d2 = self.create_val_label(front_frame, "Damper FR:", "0", row=1, col=0)
-        self.lbl_str = self.create_val_label(front_frame, "Steering:", "0", row=2, col=0)
-
-        # 3. REAR SENSORS
-        rear_frame = ttk.LabelFrame(main_container, text=" REAR SENSORS ", padding=10)
-        rear_frame.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
-
-        self.lbl_rl = self.create_val_label(rear_frame, "Damper RL:", "0", row=0, col=0)
-        self.lbl_rr = self.create_val_label(rear_frame, "Damper RR:", "0", row=1, col=0)
-
-        # 4. GPS & MOTION
+        # 2. GPS & MOTION
         gps_frame = ttk.LabelFrame(main_container, text=" GPS & MOTION ", padding=10)
-        gps_frame.grid(row=2, column=0, sticky="nsew", padx=5, pady=5)
+        gps_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
 
         self.lbl_coords = self.create_val_label(gps_frame, "Coords:", "0.0, 0.0", row=0, col=0)
         self.lbl_accel = self.create_val_label(gps_frame, "Accel (XYZ):", "0, 0, 0", row=1, col=0)
         self.lbl_gyro = self.create_val_label(gps_frame, "Gyro (XYZ):", "0, 0, 0", row=2, col=0)
 
-        # 5. SYSTEM HEALTH
+        # 3. SYSTEM HEALTH
         health_frame = ttk.LabelFrame(main_container, text=" SYSTEM HEALTH ", padding=10)
-        health_frame.grid(row=2, column=1, sticky="nsew", padx=5, pady=5)
+        health_frame.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
 
         self.lbl_front_health = self.create_val_label(health_frame, "Front:", "No data", row=0, col=0)
         self.lbl_rear_health = self.create_val_label(health_frame, "Rear:", "No data", row=1, col=0)
@@ -194,14 +174,6 @@ class TelemetryApp:
                 if can_id == CAN_ID_GEAR and len(raw_data) >= 1:
                     g = raw_data[0]
                     self.data["GEAR"] = "N" if g == 0 else str(g)
-                elif can_id == CAN_ID_FRONT_ANALOG and len(raw_data) >= 6:
-                    self.data["D1"] = (raw_data[0] << 8) | raw_data[1]
-                    self.data["D2"] = (raw_data[2] << 8) | raw_data[3]
-                    self.data["STR"] = (raw_data[4] << 8) | raw_data[5]
-                elif can_id == CAN_ID_REAR_ANALOG and len(raw_data) >= 6:
-                    self.data["RL"] = (raw_data[0] << 8) | raw_data[1]
-                    self.data["RR"] = (raw_data[2] << 8) | raw_data[3]
-                    self.data["BRK"] = (raw_data[4] << 8) | raw_data[5]
                 elif can_id == CAN_ID_ACCEL and len(raw_data) >= 6:
                     ax, ay, az = struct.unpack(">hhh", raw_data[:6])
                     self.data["AX"], self.data["AY"], self.data["AZ"] = ax/100.0, ay/100.0, az/100.0
@@ -238,14 +210,6 @@ class TelemetryApp:
         # Update Labels from Storage
         self.lbl_gear.config(text=f"{data['GEAR']}")
         
-        self.lbl_d1.config(text=f"{data['D1']}")
-        self.lbl_d2.config(text=f"{data['D2']}")
-        self.lbl_str.config(text=f"{data['STR']}")
-        
-        self.lbl_rl.config(text=f"{data['RL']}")
-        self.lbl_rr.config(text=f"{data['RR']}")
-        self.lbl_brk.config(text=f"{data['BRK']}")
-        
         self.lbl_spd.config(text=f"{data['SPD']:.1f} km/h")
         self.lbl_coords.config(text=f"{data['LAT']:.6f}, {data['LON']:.6f}")
         self.lbl_accel.config(text=f"{data['AX']:.2f}, {data['AY']:.2f}, {data['AZ']:.2f}")
@@ -263,12 +227,6 @@ class TelemetryApp:
         now = time.time()
         stale_labels = [
             (CAN_ID_GEAR, self.lbl_gear),
-            (CAN_ID_FRONT_ANALOG, self.lbl_d1),
-            (CAN_ID_FRONT_ANALOG, self.lbl_d2),
-            (CAN_ID_FRONT_ANALOG, self.lbl_str),
-            (CAN_ID_REAR_ANALOG, self.lbl_rl),
-            (CAN_ID_REAR_ANALOG, self.lbl_rr),
-            (CAN_ID_REAR_ANALOG, self.lbl_brk),
             (CAN_ID_ACCEL, self.lbl_accel),
             (CAN_ID_GYRO, self.lbl_gyro),
             (CAN_ID_GPS_SPD, self.lbl_spd),

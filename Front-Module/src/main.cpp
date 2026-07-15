@@ -5,10 +5,8 @@ char logFileName[32] = "/datalog.csv";
 
 volatile int currentGear = 0;
 volatile float currentGpsSpeed = 0.0;
-volatile uint16_t currentBrakePressure = 0;
 volatile unsigned long lastLapTime = 0;
 volatile unsigned long lastGearCanRxMs = 0;
-volatile unsigned long lastRearAnalogCanRxMs = 0;
 volatile unsigned long lastGpsPositionCanRxMs = 0;
 volatile uint32_t frontCanQueueDrops = 0;
 volatile uint32_t frontCanTxFailures = 0;
@@ -48,9 +46,8 @@ void loop() {
   unsigned long currentMillis = millis();
 
   // Mark each remote data source missing until a recent valid CAN frame arrives.
-  NO_REAR = lastGearCanRxMs == 0 || lastRearAnalogCanRxMs == 0 ||
-            currentMillis - lastGearCanRxMs > REAR_CAN_TIMEOUT_MS ||
-            currentMillis - lastRearAnalogCanRxMs > REAR_CAN_TIMEOUT_MS;
+  NO_REAR = lastGearCanRxMs == 0 ||
+            currentMillis - lastGearCanRxMs > REAR_CAN_TIMEOUT_MS;
   NO_GPS = lastGpsPositionCanRxMs == 0 ||
            currentMillis - lastGpsPositionCanRxMs > GPS_CAN_TIMEOUT_MS;
 
@@ -102,8 +99,7 @@ void loop() {
   // 3. Update Display at a lower frequency (e.g., 10Hz)
   if (currentMillis - lastDisplayUpdate >= DISPLAY_PERIOD_MS) {
     if (displayReady) {
-      updateDisplay(currentGear, lastLapTime, currentGpsSpeed,
-                    currentBrakePressure);
+      updateDisplay(currentGear, lastLapTime, currentGpsSpeed);
     }
     lastDisplayUpdate = currentMillis;
   }

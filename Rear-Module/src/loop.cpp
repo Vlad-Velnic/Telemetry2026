@@ -24,7 +24,6 @@ SemaphoreHandle_t telemetryMutex;
 
 namespace {
 constexpr size_t GPS_TELEMETRY_CAPACITY = 2;
-constexpr size_t ANALOG_TELEMETRY_CAPACITY = 4;
 constexpr size_t GEAR_TELEMETRY_CAPACITY = 4;
 
 template <typename T, size_t Capacity>
@@ -83,12 +82,8 @@ struct LatestSlot {
 
 struct TelemetryState {
     FixedQueue<GpsTelemetryPair, GPS_TELEMETRY_CAPACITY> gps;
-    FixedQueue<TelemetryMessage, ANALOG_TELEMETRY_CAPACITY> frontAnalog;
-    FixedQueue<TelemetryMessage, ANALOG_TELEMETRY_CAPACITY> rearAnalog;
     FixedQueue<TelemetryMessage, GEAR_TELEMETRY_CAPACITY> gear;
 
-    LatestSlot currentFrontAnalog;
-    LatestSlot currentRearAnalog;
     LatestSlot currentGear;
     LatestSlot currentGpsPosition;
     LatestSlot currentGpsSpeed;
@@ -99,8 +94,6 @@ struct TelemetryState {
     LatestSlot lap;
 
     uint32_t nextSequence = 0;
-    uint32_t nextFrontAnalogAt = 0;
-    uint32_t nextRearAnalogAt = 0;
     uint32_t lastGearQueuedAt = 0;
     bool online = false;
     bool snapshotPending = false;
@@ -108,8 +101,6 @@ struct TelemetryState {
 
 struct BatchCommit {
     uint32_t gpsSequence = 0;
-    uint32_t frontAnalogSequence = 0;
-    uint32_t rearAnalogSequence = 0;
     uint32_t gearSequence = 0;
     uint32_t accelGeneration = 0;
     uint32_t gyroGeneration = 0;
@@ -133,18 +124,6 @@ static void updateSlot(LatestSlot &slot, const TelemetryMessage &message, bool d
     if (dirty) slot.dirty = true;
 }
 
-static bool isDue(uint32_t now, uint32_t &nextAt, uint32_t periodMs) {
-    if (nextAt == 0) {
-        nextAt = now + periodMs;
-        return true;
-    }
-    if ((int32_t)(now - nextAt) < 0) return false;
-    do {
-        nextAt += periodMs;
-    } while ((int32_t)(now - nextAt) >= 0);
-    return true;
-}
-
 static TelemetryMessage makeMessage(uint32_t id, const uint8_t *data,
                                     size_t len, uint32_t timestamp) {
     TelemetryMessage message = {};
@@ -157,8 +136,6 @@ static TelemetryMessage makeMessage(uint32_t id, const uint8_t *data,
 
 static void clearContinuousLocked() {
     telemetryState.gps.clear();
-    telemetryState.frontAnalog.clear();
-    telemetryState.rearAnalog.clear();
     telemetryState.gear.clear();
 }
 
@@ -176,7 +153,7 @@ static void setTelemetryOnline(bool online) {
 }
 
 static bool acceptFrontCanMessage(uint32_t id, const uint8_t *data, size_t len) {
-    if (id == CAN_ID_FRONT_ANALOG || id == CAN_ID_ACCEL || id == CAN_ID_GYRO) {
+    if (id == CAN_ID_ACCEL || id == CAN_ID_GYRO) {
         return true;
     }
     return id == CAN_ID_SYSTEM_HEALTH && len >= 1 && data[0] == HEALTH_NODE_FRONT;
@@ -192,21 +169,7 @@ static void submitTelemetry(uint32_t id, const uint8_t *data, size_t len,
     TelemetryMessage message = makeMessage(id, data, len, timestamp);
     message.sequence = ++telemetryState.nextSequence;
 
-    if (id == CAN_ID_FRONT_ANALOG) {
-        updateSlot(telemetryState.currentFrontAnalog, message, false);
-        if (isDue(timestamp, telemetryState.nextFrontAnalogAt,
-                  MQTT_ANALOG_PERIOD_MS) && telemetryState.online &&
-            telemetryState.frontAnalog.push(message)) {
-            rearMqttQueueDrops++;
-        }
-    } else if (id == CAN_ID_REAR_ANALOG) {
-        updateSlot(telemetryState.currentRearAnalog, message, false);
-        if (isDue(timestamp, telemetryState.nextRearAnalogAt,
-                  MQTT_ANALOG_PERIOD_MS) && telemetryState.online &&
-            telemetryState.rearAnalog.push(message)) {
-            rearMqttQueueDrops++;
-        }
-    } else if (id == CAN_ID_ACCEL) {
+    if (id == CAN_ID_ACCEL) {
         updateSlot(telemetryState.accel, message, true);
     } else if (id == CAN_ID_GYRO) {
         updateSlot(telemetryState.gyro, message, true);
@@ -267,8 +230,6 @@ static uint8_t telemetryFreeSlots() {
         return 0;
     }
     const size_t freeSlots = telemetryState.gps.free() +
-                             telemetryState.frontAnalog.free() +
-                             telemetryState.rearAnalog.free() +
                              telemetryState.gear.free();
     xSemaphoreGive(telemetryMutex);
     return (uint8_t)min(freeSlots, (size_t)255);
@@ -367,14 +328,6 @@ static size_t prepareBatch(char *payload, BatchCommit &commit) {
                    slotIsFresh(telemetryState.currentGpsSpeed, now, 3000),
                    ignored, ignoredGeneration);
         ignored = false;
-        appendSlot(telemetryState.currentFrontAnalog,
-                   slotIsFresh(telemetryState.currentFrontAnalog, now, 1000),
-                   ignored, ignoredGeneration);
-        ignored = false;
-        appendSlot(telemetryState.currentRearAnalog,
-                   slotIsFresh(telemetryState.currentRearAnalog, now, 1000),
-                   ignored, ignoredGeneration);
-
         appendSlot(telemetryState.frontHealth,
                    slotIsFresh(telemetryState.frontHealth, now, 10000),
                    commit.frontHealthSent, commit.frontHealthGeneration);
@@ -389,8 +342,6 @@ static size_t prepareBatch(char *payload, BatchCommit &commit) {
                    commit.gyroSent, commit.gyroGeneration);
 
         commit.gpsSequence = telemetryState.gps.lastSequence();
-        commit.frontAnalogSequence = telemetryState.frontAnalog.lastSequence();
-        commit.rearAnalogSequence = telemetryState.rearAnalog.lastSequence();
         commit.gearSequence = telemetryState.gear.lastSequence();
         xSemaphoreGive(telemetryMutex);
         return payloadLength;
@@ -406,17 +357,6 @@ static size_t prepareBatch(char *payload, BatchCommit &commit) {
         if (!appendGpsPair(payload, payloadLength, pair)) break;
         commit.gpsSequence = pair.sequence;
     }
-    for (size_t i = 0; i < telemetryState.frontAnalog.size(); ++i) {
-        const TelemetryMessage &message = telemetryState.frontAnalog.at(i);
-        if (!appendRecord(payload, payloadLength, message)) break;
-        commit.frontAnalogSequence = message.sequence;
-    }
-    for (size_t i = 0; i < telemetryState.rearAnalog.size(); ++i) {
-        const TelemetryMessage &message = telemetryState.rearAnalog.at(i);
-        if (!appendRecord(payload, payloadLength, message)) break;
-        commit.rearAnalogSequence = message.sequence;
-    }
-
     appendSlot(telemetryState.frontHealth,
                telemetryState.frontHealth.valid && telemetryState.frontHealth.dirty,
                commit.frontHealthSent, commit.frontHealthGeneration);
@@ -444,8 +384,6 @@ static void commitBatch(const BatchCommit &commit) {
         return;
     }
     telemetryState.gps.discardThrough(commit.gpsSequence);
-    telemetryState.frontAnalog.discardThrough(commit.frontAnalogSequence);
-    telemetryState.rearAnalog.discardThrough(commit.rearAnalogSequence);
     telemetryState.gear.discardThrough(commit.gearSequence);
     clearSlotIfSent(telemetryState.accel, commit.accelSent, commit.accelGeneration);
     clearSlotIfSent(telemetryState.gyro, commit.gyroSent, commit.gyroGeneration);
@@ -488,7 +426,9 @@ void broadcastData(uint32_t id, uint8_t* data, size_t len) {
     if (len > 8) len = 8;
     const uint32_t timestamp = millis();
     sendCanMessage(id, data, len);
-    submitTelemetry(id, data, len, timestamp);
+    if (id != CAN_ID_FRONT_ANALOG && id != CAN_ID_REAR_ANALOG) {
+        submitTelemetry(id, data, len, timestamp);
+    }
 }
 
 static uint16_t saturateU16(uint32_t value) {
@@ -537,23 +477,6 @@ int getGear() {
     return 0;
 }
 
-static bool gnssDegreesMinutesToDecimal(float rawCoordinate,
-                                        float maximumDegrees,
-                                        float &decimalDegrees) {
-    if (!isfinite(rawCoordinate)) return false;
-
-    const float magnitude = fabsf(rawCoordinate);
-    const float degrees = floorf(magnitude / 100.0f);
-    const float minutes = magnitude - degrees * 100.0f;
-    if (degrees > maximumDegrees || minutes < 0.0f || minutes >= 60.0f) {
-        return false;
-    }
-
-    decimalDegrees = degrees + minutes / 60.0f;
-    if (rawCoordinate < 0.0f) decimalDegrees = -decimalDegrees;
-    return true;
-}
-
 // --- GPS HELPER ---
 bool getFastGPS(GPSPoint &point) {
     uint8_t fixStatus = 0;
@@ -565,20 +488,21 @@ bool getFastGPS(GPSPoint &point) {
         return false;
     }
 
-    float decimalLatitude = 0.0f;
-    float decimalLongitude = 0.0f;
-    if (!gnssDegreesMinutesToDecimal(rawLatitude, 90.0f, decimalLatitude) ||
-        !gnssDegreesMinutesToDecimal(rawLongitude, 180.0f, decimalLongitude) ||
+    // A76xx +CGNSSINFO reports signed decimal degrees on this modem variant.
+    // TinyGSM already applies the N/S and E/W signs, so no NMEA ddmm conversion
+    // belongs here. This point is the canonical value for lap timing, CAN, and MQTT.
+    if (!isfinite(rawLatitude) || fabsf(rawLatitude) > 90.0f ||
+        !isfinite(rawLongitude) || fabsf(rawLongitude) > 180.0f ||
         !isfinite(speedKnots) || speedKnots < 0.0f) {
         return false;
     }
 
-    gps_lat = decimalLatitude;
-    gps_lon = decimalLongitude;
+    gps_lat = rawLatitude;
+    gps_lon = rawLongitude;
     gps_speed = speedKnots * 1.852f;
 
-    point.lat = decimalLatitude;
-    point.lon = decimalLongitude;
+    point.lat = rawLatitude;
+    point.lon = rawLongitude;
     point.speed = gps_speed;
 
     return true;
@@ -665,7 +589,13 @@ void GPS_Task(void *pvParameters) {
             point.timestamp = queryStart + (millis() - queryStart) / 2;
             rearGpsHasFix = true;
 
-            if (xQueueSend(lapGpsQueue, &point, 0) != pdTRUE) {
+            const bool lapGateConfigured = LAP_TIMING_ENABLED &&
+                isfinite(LAP_GATE_LEFT_LAT) && isfinite(LAP_GATE_LEFT_LON) &&
+                isfinite(LAP_GATE_RIGHT_LAT) && isfinite(LAP_GATE_RIGHT_LON) &&
+                (fabs(LAP_GATE_LEFT_LAT - LAP_GATE_RIGHT_LAT) > 1e-12 ||
+                 fabs(LAP_GATE_LEFT_LON - LAP_GATE_RIGHT_LON) > 1e-12);
+            if (lapGateConfigured &&
+                xQueueSend(lapGpsQueue, &point, 0) != pdTRUE) {
                 GPSPoint discardedPoint;
                 xQueueReceive(lapGpsQueue, &discardedPoint, 0);
                 xQueueSend(lapGpsQueue, &point, 0);

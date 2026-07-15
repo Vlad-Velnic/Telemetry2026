@@ -19,20 +19,6 @@ def define(name):
     return int(match.group(1))
 
 
-def rate_gate(timestamps, period_ms):
-    selected = []
-    next_at = None
-    for timestamp in timestamps:
-        if next_at is None:
-            selected.append(timestamp)
-            next_at = timestamp + period_ms
-        elif timestamp >= next_at:
-            selected.append(timestamp)
-            while timestamp >= next_at:
-                next_at += period_ms
-    return selected
-
-
 def record(timestamp, can_id, byte_count):
     return f"{timestamp},{can_id:X},{'AB' * byte_count}"
 
@@ -54,12 +40,10 @@ class LatestSlot:
 
 
 class PolicyModel:
-    priorities = ("lap", "gear", "gps", "analog", "health", "imu")
+    priorities = ("lap", "gear", "gps", "health", "imu")
 
     def __init__(self):
         self.gps = deque(maxlen=2)
-        self.front_analog = deque(maxlen=4)
-        self.rear_analog = deque(maxlen=4)
         self.gear = deque(maxlen=4)
         self.health = {1: None, 2: None}
         self.current = {}
@@ -73,8 +57,6 @@ class PolicyModel:
 
     def disconnect(self):
         self.gps.clear()
-        self.front_analog.clear()
-        self.rear_analog.clear()
         self.gear.clear()
 
     def snapshot(self):
@@ -84,13 +66,13 @@ class PolicyModel:
 class TelemetryPolicyTests(unittest.TestCase):
     def test_firmware_rate_constants(self):
         self.assertEqual(define("SENSOR_FREQ_HZ"), 25)
-        self.assertEqual(define("MQTT_ANALOG_PERIOD_MS"), 100)
         self.assertEqual(define("MQTT_PUBLISH_PERIOD_MS"), 200)
         self.assertEqual(define("MQTT_PACKET_BUFFER_SIZE"), 512)
 
-    def test_25_hz_input_produces_10_hz_analog(self):
-        samples = list(range(0, 1000, 40))
-        self.assertEqual(len(rate_gate(samples, 100)), 10)
+    def test_analog_can_ids_are_not_part_of_mqtt_policy(self):
+        accepted = {0x501, 0x502, 0x700, 0x750, 0x751, 0x777, 0x7FF}
+        self.assertNotIn(0x500, accepted)
+        self.assertNotIn(0x701, accepted)
 
     def test_latest_imu_is_published_at_5_hz(self):
         inputs = list(range(0, 1000, 40))
@@ -104,6 +86,16 @@ class TelemetryPolicyTests(unittest.TestCase):
         self.assertEqual(len(epochs), 5)
         self.assertTrue(all(position.rsplit("-", 1)[1] == speed.rsplit("-", 1)[1]
                             for _, (position, speed) in epochs))
+
+    def test_canonical_gps_point_is_decimal_for_can_mqtt_and_lap(self):
+        source = (ROOT / "Rear-Module" / "src" / "loop.cpp").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("point.lat = rawLatitude;", source)
+        self.assertIn("point.lon = rawLongitude;", source)
+        self.assertNotIn("gnssDegreesMinutesToDecimal", source)
+        self.assertIn("xQueueSend(lapGpsQueue, &point", source)
+        self.assertIn("submitGpsTelemetry(point);", source)
 
     def test_gear_transitions_and_one_hz_refresh(self):
         samples = [(t, 0 if t < 240 else 1) for t in range(0, 1280, 40)]
@@ -129,10 +121,6 @@ class TelemetryPolicyTests(unittest.TestCase):
             record(123456789, 0x700, 1),
             record(123456789, 0x750, 8),
             record(123456789, 0x751, 4),
-            record(123456789, 0x500, 6),
-            record(123456789, 0x500, 6),
-            record(123456789, 0x701, 6),
-            record(123456789, 0x701, 6),
             record(123456789, 0x7FF, 8),
             record(123456789, 0x7FF, 8),
             record(123456789, 0x501, 6),
@@ -162,25 +150,22 @@ class TelemetryPolicyTests(unittest.TestCase):
     def test_priority_order(self):
         self.assertEqual(
             PolicyModel.priorities,
-            ("lap", "gear", "gps", "analog", "health", "imu"),
+            ("lap", "gear", "gps", "health", "imu"),
         )
 
     def test_disconnect_discards_history_but_preserves_current_and_lap(self):
         policy = PolicyModel()
         policy.gps.extend(["old-gps-1", "old-gps-2"])
-        policy.front_analog.extend(["old-front"])
-        policy.rear_analog.extend(["old-rear"])
         policy.gear.extend([1, 2])
-        policy.current = {"gps": "fresh-gps", "front": "fresh-front", "gear": 2}
+        policy.current = {"gps": "fresh-gps", "gear": 2}
         policy.lap = 81234
         policy.disconnect()
-        self.assertFalse(policy.gps or policy.front_analog or
-                         policy.rear_analog or policy.gear)
+        self.assertFalse(policy.gps or policy.gear)
         self.assertEqual(policy.snapshot(), (policy.current, 81234))
 
     def test_ecu_and_unknown_can_ids_are_ignored(self):
-        accepted = {0x500, 0x501, 0x502}
-        self.assertFalse({0x600, 0x601, 0x602, 0x123} & accepted)
+        accepted = {0x501, 0x502}
+        self.assertFalse({0x500, 0x600, 0x601, 0x602, 0x701, 0x123} & accepted)
 
 
 if __name__ == "__main__":

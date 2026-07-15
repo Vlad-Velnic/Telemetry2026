@@ -37,7 +37,7 @@ void setup() {
     }
 
     if (rearModemReady && modemMutex && telemetryMutex) {
-        xTaskCreatePinnedToCore(MQTT_Task, "MQTT", 8192, NULL, 2, NULL, 1);
+        xTaskCreatePinnedToCore(MQTT_Task, "MQTT", 8192, NULL, 4, NULL, 1);
     }
 
     // Core 0 Task: Calculate lap time from GPS gate crossings

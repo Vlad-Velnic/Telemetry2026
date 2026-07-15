@@ -13,6 +13,6 @@ void SD_Task(void *pvParameters);
 void broadcastData(uint32_t id, uint8_t* data, size_t len);
 void sendHealthFrame();
 void updateDisplay(uint8_t currentGear, unsigned long lastLapTime,
-                   float gpsSpeed, uint16_t brakePressure);
+                   float gpsSpeed);
 
 #endif

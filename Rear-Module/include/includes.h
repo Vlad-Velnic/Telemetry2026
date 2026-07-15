@@ -8,7 +8,7 @@
 
 // --- LIBRARIES ---
 #define TINY_GSM_MODEM_A7670
-#define ENABLE_OTA 1
+#define ENABLE_OTA 0
 
 #if ENABLE_OTA
 #include <WiFi.h>
@@ -45,7 +45,6 @@ static constexpr uint32_t OTA_RECONNECT_INTERVAL_MS = 10000;
 #define HEALTH_PERIOD_MS 5000
 static constexpr uint32_t MQTT_PUBLISH_PERIOD_MS = 200;
 static constexpr uint32_t MQTT_LOOP_PERIOD_MS = 100;
-static constexpr uint32_t MQTT_ANALOG_PERIOD_MS = 100;
 static constexpr uint32_t MQTT_GEAR_REFRESH_MS = 1000;
 static constexpr uint32_t MQTT_GPS_GUARD_MS = 50;
 static constexpr uint16_t MQTT_PACKET_BUFFER_SIZE = 512;
@@ -61,8 +60,8 @@ static constexpr double LAP_GATE_RIGHT_LAT = 0.0;
 static constexpr double LAP_GATE_RIGHT_LON = 0.0;
 static constexpr uint32_t LAP_MIN_TIME_MS = 10000;
 static constexpr uint32_t LAP_MAX_SAMPLE_GAP_MS = 2500;
-static constexpr float LAP_MIN_CROSSING_SPEED_KMH = 5.0f;
-static constexpr uint8_t LAP_GPS_QUEUE_LENGTH = 16;
+static constexpr float LAP_MIN_CROSSING_SPEED_KMH = 3.0f;
+static constexpr uint8_t LAP_GPS_QUEUE_LENGTH = 20;
 
 // Health frame node IDs
 #define HEALTH_NODE_FRONT 1

@@ -99,8 +99,6 @@ void CAN_Task(void *pvParameters) {
 
             if (rxMsg.identifier == CAN_ID_GEAR && rxMsg.data_length_code >= 1)
                 lastGearCanRxMs = rxTimestamp;
-            if (rxMsg.identifier == CAN_ID_REAR_ANALOG && rxMsg.data_length_code >= 6)
-                lastRearAnalogCanRxMs = rxTimestamp;
             if (rxMsg.identifier == CAN_ID_GPS_POS && rxMsg.data_length_code >= 8) {
                 lastGpsPositionCanRxMs = rxTimestamp;
             }
@@ -108,11 +106,6 @@ void CAN_Task(void *pvParameters) {
             // 2. Update Display Variables (Only if relevant)
             if (rxMsg.identifier == CAN_ID_GEAR && rxMsg.data_length_code >= 1) {
                 currentGear = rxMsg.data[0];
-            }
-            else if (rxMsg.identifier == CAN_ID_REAR_ANALOG &&
-                     rxMsg.data_length_code >= 6) {
-                currentBrakePressure = ((uint16_t)rxMsg.data[4] << 8) |
-                                       rxMsg.data[5];
             }
             else if (rxMsg.identifier == CAN_ID_GPS_SPD &&
                      rxMsg.data_length_code >= sizeof(float)) {
@@ -206,7 +199,7 @@ void SD_Task(void *pvParameters) {
 }
 
 void updateDisplay(uint8_t currentGear, unsigned long lastLapTime,
-                   float gpsSpeed, uint16_t brakePressure)
+                   float gpsSpeed)
 {
     display.clearDisplay();
 
@@ -247,28 +240,6 @@ void updateDisplay(uint8_t currentGear, unsigned long lastLapTime,
     // GPS speed is retained even while stale; the G marker communicates age.
     display.setCursor(50, 34);
     display.printf("%.1f km/h", gpsSpeed);
-
-    display.setCursor(50, 51);
-    display.print("B");
-    display.drawRect(BRAKE_BAR_X, BRAKE_BAR_Y, BRAKE_BAR_WIDTH,
-                     BRAKE_BAR_HEIGHT, SSD1306_WHITE);
-
-    size_t fillWidth = 0;
-    if (BRAKE_PRESSURE_MAX_RAW <= BRAKE_PRESSURE_MIN_RAW) {
-        static bool calibrationWarningShown = false;
-        if (!calibrationWarningShown) {
-            DEBUG_PRINTLN(F("Invalid brake pressure calibration: max <= min"));
-            calibrationWarningShown = true;
-        }
-    } else {
-        fillWidth = displayedBrakeBarFillWidth(
-            brakePressure, NO_REAR, BRAKE_PRESSURE_MIN_RAW,
-            BRAKE_PRESSURE_MAX_RAW, BRAKE_BAR_INTERIOR_WIDTH);
-    }
-    if (fillWidth > 0) {
-        display.fillRect(BRAKE_BAR_X + 1, BRAKE_BAR_Y + 1, fillWidth,
-                         BRAKE_BAR_INTERIOR_HEIGHT, SSD1306_WHITE);
-    }
 
     display.display();
 }

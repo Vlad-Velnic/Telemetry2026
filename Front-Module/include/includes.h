@@ -22,7 +22,6 @@
 #include "setup.h"
 #include "loop.h"
 #include "canIDs.h"
-#include "brake_bar.h"
 
 // Timing Constants
 #define LOGGING_FREQ_HZ 25
@@ -40,10 +39,8 @@
 // --- DATA GLOBALS (Shared) ---
 extern volatile int currentGear;
 extern volatile float currentGpsSpeed;
-extern volatile uint16_t currentBrakePressure;
 extern volatile unsigned long lastLapTime;
 extern volatile unsigned long lastGearCanRxMs;
-extern volatile unsigned long lastRearAnalogCanRxMs;
 extern volatile unsigned long lastGpsPositionCanRxMs;
 extern volatile uint32_t frontCanQueueDrops;
 extern volatile uint32_t frontCanTxFailures;
