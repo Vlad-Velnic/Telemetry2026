@@ -8,12 +8,469 @@ volatile int currentGear = 0;
 volatile uint32_t rearMqttQueueDrops = 0;
 volatile uint32_t rearMqttPublishFailures = 0;
 volatile uint32_t rearCanTxFailures = 0;
+volatile uint32_t rearGpsMissedDeadlines = 0;
+volatile uint32_t rearGpsQueueLosses = 0;
+volatile uint32_t rearGpsAssistanceFailures = 0;
 volatile bool rearCanReady = false;
 volatile bool rearMqttConnected = false;
+volatile bool rearModemReady = false;
+volatile bool rearGpsHasFix = false;
+volatile uint8_t gpsRateHz = 1;
+volatile uint32_t nextGpsDeadlineMs = 0;
 
-// Queue for outgoing MQTT messages (CAN data)
-QueueHandle_t mqttQueue;
 QueueHandle_t lapGpsQueue;
+SemaphoreHandle_t modemMutex;
+SemaphoreHandle_t telemetryMutex;
+
+namespace {
+constexpr size_t GPS_TELEMETRY_CAPACITY = 2;
+constexpr size_t ANALOG_TELEMETRY_CAPACITY = 4;
+constexpr size_t GEAR_TELEMETRY_CAPACITY = 4;
+
+template <typename T, size_t Capacity>
+class FixedQueue {
+ public:
+    bool push(const T &value) {
+        bool dropped = false;
+        if (count_ == Capacity) {
+            head_ = (head_ + 1) % Capacity;
+            count_--;
+            dropped = true;
+        }
+        values_[(head_ + count_) % Capacity] = value;
+        count_++;
+        return dropped;
+    }
+
+    size_t size() const { return count_; }
+    size_t free() const { return Capacity - count_; }
+    const T &at(size_t index) const { return values_[(head_ + index) % Capacity]; }
+
+    void clear() {
+        head_ = 0;
+        count_ = 0;
+    }
+
+    void discardThrough(uint32_t sequence) {
+        while (count_ > 0 && at(0).sequence <= sequence) {
+            head_ = (head_ + 1) % Capacity;
+            count_--;
+        }
+    }
+
+    uint32_t lastSequence() const {
+        return count_ == 0 ? 0 : at(count_ - 1).sequence;
+    }
+
+ private:
+    T values_[Capacity] = {};
+    size_t head_ = 0;
+    size_t count_ = 0;
+};
+
+struct GpsTelemetryPair {
+    TelemetryMessage position;
+    TelemetryMessage speed;
+    uint32_t sequence;
+};
+
+struct LatestSlot {
+    TelemetryMessage message = {};
+    uint32_t generation = 0;
+    bool valid = false;
+    bool dirty = false;
+};
+
+struct TelemetryState {
+    FixedQueue<GpsTelemetryPair, GPS_TELEMETRY_CAPACITY> gps;
+    FixedQueue<TelemetryMessage, ANALOG_TELEMETRY_CAPACITY> frontAnalog;
+    FixedQueue<TelemetryMessage, ANALOG_TELEMETRY_CAPACITY> rearAnalog;
+    FixedQueue<TelemetryMessage, GEAR_TELEMETRY_CAPACITY> gear;
+
+    LatestSlot currentFrontAnalog;
+    LatestSlot currentRearAnalog;
+    LatestSlot currentGear;
+    LatestSlot currentGpsPosition;
+    LatestSlot currentGpsSpeed;
+    LatestSlot accel;
+    LatestSlot gyro;
+    LatestSlot frontHealth;
+    LatestSlot rearHealth;
+    LatestSlot lap;
+
+    uint32_t nextSequence = 0;
+    uint32_t nextFrontAnalogAt = 0;
+    uint32_t nextRearAnalogAt = 0;
+    uint32_t lastGearQueuedAt = 0;
+    bool online = false;
+    bool snapshotPending = false;
+};
+
+struct BatchCommit {
+    uint32_t gpsSequence = 0;
+    uint32_t frontAnalogSequence = 0;
+    uint32_t rearAnalogSequence = 0;
+    uint32_t gearSequence = 0;
+    uint32_t accelGeneration = 0;
+    uint32_t gyroGeneration = 0;
+    uint32_t frontHealthGeneration = 0;
+    uint32_t rearHealthGeneration = 0;
+    uint32_t lapGeneration = 0;
+    bool accelSent = false;
+    bool gyroSent = false;
+    bool frontHealthSent = false;
+    bool rearHealthSent = false;
+    bool lapSent = false;
+    bool snapshot = false;
+};
+
+TelemetryState telemetryState;
+
+static void updateSlot(LatestSlot &slot, const TelemetryMessage &message, bool dirty) {
+    slot.message = message;
+    slot.generation++;
+    slot.valid = true;
+    if (dirty) slot.dirty = true;
+}
+
+static bool isDue(uint32_t now, uint32_t &nextAt, uint32_t periodMs) {
+    if (nextAt == 0) {
+        nextAt = now + periodMs;
+        return true;
+    }
+    if ((int32_t)(now - nextAt) < 0) return false;
+    do {
+        nextAt += periodMs;
+    } while ((int32_t)(now - nextAt) >= 0);
+    return true;
+}
+
+static TelemetryMessage makeMessage(uint32_t id, const uint8_t *data,
+                                    size_t len, uint32_t timestamp) {
+    TelemetryMessage message = {};
+    message.id = id;
+    message.len = min(len, (size_t)8);
+    message.timestamp = timestamp;
+    if (message.len > 0) memcpy(message.data, data, message.len);
+    return message;
+}
+
+static void clearContinuousLocked() {
+    telemetryState.gps.clear();
+    telemetryState.frontAnalog.clear();
+    telemetryState.rearAnalog.clear();
+    telemetryState.gear.clear();
+}
+
+static void setTelemetryOnline(bool online) {
+    if (!telemetryMutex || xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(20)) != pdTRUE) {
+        rearMqttQueueDrops++;
+        return;
+    }
+    if (telemetryState.online != online) {
+        clearContinuousLocked();
+        telemetryState.online = online;
+        telemetryState.snapshotPending = online;
+    }
+    xSemaphoreGive(telemetryMutex);
+}
+
+static bool acceptFrontCanMessage(uint32_t id, const uint8_t *data, size_t len) {
+    if (id == CAN_ID_FRONT_ANALOG || id == CAN_ID_ACCEL || id == CAN_ID_GYRO) {
+        return true;
+    }
+    return id == CAN_ID_SYSTEM_HEALTH && len >= 1 && data[0] == HEALTH_NODE_FRONT;
+}
+
+static void submitTelemetry(uint32_t id, const uint8_t *data, size_t len,
+                            uint32_t timestamp) {
+    if (!telemetryMutex || xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(2)) != pdTRUE) {
+        rearMqttQueueDrops++;
+        return;
+    }
+
+    TelemetryMessage message = makeMessage(id, data, len, timestamp);
+    message.sequence = ++telemetryState.nextSequence;
+
+    if (id == CAN_ID_FRONT_ANALOG) {
+        updateSlot(telemetryState.currentFrontAnalog, message, false);
+        if (isDue(timestamp, telemetryState.nextFrontAnalogAt,
+                  MQTT_ANALOG_PERIOD_MS) && telemetryState.online &&
+            telemetryState.frontAnalog.push(message)) {
+            rearMqttQueueDrops++;
+        }
+    } else if (id == CAN_ID_REAR_ANALOG) {
+        updateSlot(telemetryState.currentRearAnalog, message, false);
+        if (isDue(timestamp, telemetryState.nextRearAnalogAt,
+                  MQTT_ANALOG_PERIOD_MS) && telemetryState.online &&
+            telemetryState.rearAnalog.push(message)) {
+            rearMqttQueueDrops++;
+        }
+    } else if (id == CAN_ID_ACCEL) {
+        updateSlot(telemetryState.accel, message, true);
+    } else if (id == CAN_ID_GYRO) {
+        updateSlot(telemetryState.gyro, message, true);
+    } else if (id == CAN_ID_GEAR && len >= 1) {
+        const bool changed = !telemetryState.currentGear.valid ||
+                             telemetryState.currentGear.message.data[0] != data[0];
+        updateSlot(telemetryState.currentGear, message, false);
+        if (telemetryState.online &&
+            (changed || timestamp - telemetryState.lastGearQueuedAt >= MQTT_GEAR_REFRESH_MS)) {
+            telemetryState.lastGearQueuedAt = timestamp;
+            if (telemetryState.gear.push(message)) rearMqttQueueDrops++;
+        }
+    } else if (id == CAN_ID_LAPTIME) {
+        updateSlot(telemetryState.lap, message, true);
+    } else if (id == CAN_ID_SYSTEM_HEALTH && len >= 1) {
+        if (data[0] == HEALTH_NODE_FRONT) {
+            updateSlot(telemetryState.frontHealth, message, true);
+        } else if (data[0] == HEALTH_NODE_REAR) {
+            updateSlot(telemetryState.rearHealth, message, true);
+        }
+    }
+
+    xSemaphoreGive(telemetryMutex);
+}
+
+static void submitGpsTelemetry(const GPSPoint &point) {
+    const float latitude = (float)point.lat;
+    const float longitude = (float)point.lon;
+    uint8_t positionData[8];
+    uint8_t speedData[4];
+    memcpy(positionData, &latitude, sizeof(latitude));
+    memcpy(positionData + sizeof(latitude), &longitude, sizeof(longitude));
+    memcpy(speedData, &point.speed, sizeof(point.speed));
+
+    if (!telemetryMutex || xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(2)) != pdTRUE) {
+        rearMqttQueueDrops++;
+        return;
+    }
+
+    GpsTelemetryPair pair = {};
+    pair.sequence = ++telemetryState.nextSequence;
+    pair.position = makeMessage(CAN_ID_GPS_POS, positionData, sizeof(positionData),
+                                point.timestamp);
+    pair.speed = makeMessage(CAN_ID_GPS_SPD, speedData, sizeof(speedData),
+                             point.timestamp);
+    pair.position.sequence = pair.sequence;
+    pair.speed.sequence = pair.sequence;
+    updateSlot(telemetryState.currentGpsPosition, pair.position, false);
+    updateSlot(telemetryState.currentGpsSpeed, pair.speed, false);
+    if (telemetryState.online && telemetryState.gps.push(pair)) {
+        rearMqttQueueDrops++;
+    }
+    xSemaphoreGive(telemetryMutex);
+}
+
+static uint8_t telemetryFreeSlots() {
+    if (!telemetryMutex || xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(2)) != pdTRUE) {
+        return 0;
+    }
+    const size_t freeSlots = telemetryState.gps.free() +
+                             telemetryState.frontAnalog.free() +
+                             telemetryState.rearAnalog.free() +
+                             telemetryState.gear.free();
+    xSemaphoreGive(telemetryMutex);
+    return (uint8_t)min(freeSlots, (size_t)255);
+}
+
+static int formatRecord(const TelemetryMessage &message, char *record, size_t size) {
+    char hexData[17] = {};
+    for (uint8_t i = 0; i < message.len; ++i) {
+        snprintf(hexData + i * 2, sizeof(hexData) - i * 2, "%02X", message.data[i]);
+    }
+    return snprintf(record, size, "%lu,%X,%s", message.timestamp,
+                    (unsigned int)message.id, hexData);
+}
+
+static bool appendRecord(char *payload, size_t &payloadLength,
+                         const TelemetryMessage &message) {
+    char record[48];
+    const int recordLength = formatRecord(message, record, sizeof(record));
+    if (recordLength <= 0 || recordLength >= (int)sizeof(record)) return false;
+    const size_t separator = payloadLength > 0 ? 1 : 0;
+    if (payloadLength + separator + (size_t)recordLength >= MQTT_PAYLOAD_BUFFER_SIZE) {
+        return false;
+    }
+    if (separator) payload[payloadLength++] = ';';
+    memcpy(payload + payloadLength, record, (size_t)recordLength);
+    payloadLength += (size_t)recordLength;
+    payload[payloadLength] = '\0';
+    return true;
+}
+
+static bool appendGpsPair(char *payload, size_t &payloadLength,
+                          const GpsTelemetryPair &pair) {
+    char positionRecord[48];
+    char speedRecord[48];
+    const int positionLength = formatRecord(pair.position, positionRecord,
+                                            sizeof(positionRecord));
+    const int speedLength = formatRecord(pair.speed, speedRecord, sizeof(speedRecord));
+    if (positionLength <= 0 || speedLength <= 0 ||
+        positionLength >= (int)sizeof(positionRecord) ||
+        speedLength >= (int)sizeof(speedRecord)) {
+        return false;
+    }
+    const size_t separators = payloadLength > 0 ? 2 : 1;
+    if (payloadLength + separators + (size_t)positionLength + (size_t)speedLength >=
+        MQTT_PAYLOAD_BUFFER_SIZE) {
+        return false;
+    }
+    if (payloadLength > 0) payload[payloadLength++] = ';';
+    memcpy(payload + payloadLength, positionRecord, (size_t)positionLength);
+    payloadLength += (size_t)positionLength;
+    payload[payloadLength++] = ';';
+    memcpy(payload + payloadLength, speedRecord, (size_t)speedLength);
+    payloadLength += (size_t)speedLength;
+    payload[payloadLength] = '\0';
+    return true;
+}
+
+static bool slotIsFresh(const LatestSlot &slot, uint32_t now, uint32_t maxAge) {
+    return slot.valid && now - slot.message.timestamp <= maxAge;
+}
+
+static size_t prepareBatch(char *payload, BatchCommit &commit) {
+    payload[0] = '\0';
+    size_t payloadLength = 0;
+    if (!telemetryMutex || xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(20)) != pdTRUE) {
+        return 0;
+    }
+
+    const uint32_t now = millis();
+    commit.snapshot = telemetryState.snapshotPending;
+
+    auto appendSlot = [&](LatestSlot &slot, bool allow, bool &sent,
+                          uint32_t &generation) {
+        if (!allow || !appendRecord(payload, payloadLength, slot.message)) return;
+        sent = true;
+        generation = slot.generation;
+    };
+
+    // Persistent event first.
+    appendSlot(telemetryState.lap, telemetryState.lap.valid &&
+               (telemetryState.lap.dirty || commit.snapshot), commit.lapSent,
+               commit.lapGeneration);
+
+    if (commit.snapshot) {
+        bool ignored = false;
+        uint32_t ignoredGeneration = 0;
+        appendSlot(telemetryState.currentGear,
+                   slotIsFresh(telemetryState.currentGear, now, 1500),
+                   ignored, ignoredGeneration);
+        ignored = false;
+        appendSlot(telemetryState.currentGpsPosition,
+                   slotIsFresh(telemetryState.currentGpsPosition, now, 3000),
+                   ignored, ignoredGeneration);
+        ignored = false;
+        appendSlot(telemetryState.currentGpsSpeed,
+                   slotIsFresh(telemetryState.currentGpsSpeed, now, 3000),
+                   ignored, ignoredGeneration);
+        ignored = false;
+        appendSlot(telemetryState.currentFrontAnalog,
+                   slotIsFresh(telemetryState.currentFrontAnalog, now, 1000),
+                   ignored, ignoredGeneration);
+        ignored = false;
+        appendSlot(telemetryState.currentRearAnalog,
+                   slotIsFresh(telemetryState.currentRearAnalog, now, 1000),
+                   ignored, ignoredGeneration);
+
+        appendSlot(telemetryState.frontHealth,
+                   slotIsFresh(telemetryState.frontHealth, now, 10000),
+                   commit.frontHealthSent, commit.frontHealthGeneration);
+        appendSlot(telemetryState.rearHealth,
+                   slotIsFresh(telemetryState.rearHealth, now, 10000),
+                   commit.rearHealthSent, commit.rearHealthGeneration);
+        appendSlot(telemetryState.accel,
+                   slotIsFresh(telemetryState.accel, now, 1000),
+                   commit.accelSent, commit.accelGeneration);
+        appendSlot(telemetryState.gyro,
+                   slotIsFresh(telemetryState.gyro, now, 1000),
+                   commit.gyroSent, commit.gyroGeneration);
+
+        commit.gpsSequence = telemetryState.gps.lastSequence();
+        commit.frontAnalogSequence = telemetryState.frontAnalog.lastSequence();
+        commit.rearAnalogSequence = telemetryState.rearAnalog.lastSequence();
+        commit.gearSequence = telemetryState.gear.lastSequence();
+        xSemaphoreGive(telemetryMutex);
+        return payloadLength;
+    }
+
+    for (size_t i = 0; i < telemetryState.gear.size(); ++i) {
+        const TelemetryMessage &message = telemetryState.gear.at(i);
+        if (!appendRecord(payload, payloadLength, message)) break;
+        commit.gearSequence = message.sequence;
+    }
+    for (size_t i = 0; i < telemetryState.gps.size(); ++i) {
+        const GpsTelemetryPair &pair = telemetryState.gps.at(i);
+        if (!appendGpsPair(payload, payloadLength, pair)) break;
+        commit.gpsSequence = pair.sequence;
+    }
+    for (size_t i = 0; i < telemetryState.frontAnalog.size(); ++i) {
+        const TelemetryMessage &message = telemetryState.frontAnalog.at(i);
+        if (!appendRecord(payload, payloadLength, message)) break;
+        commit.frontAnalogSequence = message.sequence;
+    }
+    for (size_t i = 0; i < telemetryState.rearAnalog.size(); ++i) {
+        const TelemetryMessage &message = telemetryState.rearAnalog.at(i);
+        if (!appendRecord(payload, payloadLength, message)) break;
+        commit.rearAnalogSequence = message.sequence;
+    }
+
+    appendSlot(telemetryState.frontHealth,
+               telemetryState.frontHealth.valid && telemetryState.frontHealth.dirty,
+               commit.frontHealthSent, commit.frontHealthGeneration);
+    appendSlot(telemetryState.rearHealth,
+               telemetryState.rearHealth.valid && telemetryState.rearHealth.dirty,
+               commit.rearHealthSent, commit.rearHealthGeneration);
+    appendSlot(telemetryState.accel,
+               telemetryState.accel.valid && telemetryState.accel.dirty,
+               commit.accelSent, commit.accelGeneration);
+    appendSlot(telemetryState.gyro,
+               telemetryState.gyro.valid && telemetryState.gyro.dirty,
+               commit.gyroSent, commit.gyroGeneration);
+
+    xSemaphoreGive(telemetryMutex);
+    return payloadLength;
+}
+
+static void clearSlotIfSent(LatestSlot &slot, bool sent, uint32_t generation) {
+    if (sent && slot.generation == generation) slot.dirty = false;
+}
+
+static void commitBatch(const BatchCommit &commit) {
+    if (!telemetryMutex || xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(20)) != pdTRUE) {
+        rearMqttQueueDrops++;
+        return;
+    }
+    telemetryState.gps.discardThrough(commit.gpsSequence);
+    telemetryState.frontAnalog.discardThrough(commit.frontAnalogSequence);
+    telemetryState.rearAnalog.discardThrough(commit.rearAnalogSequence);
+    telemetryState.gear.discardThrough(commit.gearSequence);
+    clearSlotIfSent(telemetryState.accel, commit.accelSent, commit.accelGeneration);
+    clearSlotIfSent(telemetryState.gyro, commit.gyroSent, commit.gyroGeneration);
+    clearSlotIfSent(telemetryState.frontHealth, commit.frontHealthSent,
+                    commit.frontHealthGeneration);
+    clearSlotIfSent(telemetryState.rearHealth, commit.rearHealthSent,
+                    commit.rearHealthGeneration);
+    clearSlotIfSent(telemetryState.lap, commit.lapSent, commit.lapGeneration);
+    if (commit.snapshot) telemetryState.snapshotPending = false;
+    xSemaphoreGive(telemetryMutex);
+}
+
+static bool gpsDeadlineImminent() {
+    const int32_t untilDeadline = (int32_t)(nextGpsDeadlineMs - millis());
+    return untilDeadline >= 0 && untilDeadline < (int32_t)MQTT_GPS_GUARD_MS;
+}
+
+static bool takeModem(uint32_t timeoutMs) {
+    return modemMutex && xSemaphoreTake(modemMutex, pdMS_TO_TICKS(timeoutMs)) == pdTRUE;
+}
+
+static void giveModem() {
+    if (modemMutex) xSemaphoreGive(modemMutex);
+}
+}  // namespace
 
 void sendCanMessage(uint32_t id, uint8_t* data, size_t length) {
     if (length > 8) length = 8;
@@ -29,28 +486,9 @@ void sendCanMessage(uint32_t id, uint8_t* data, size_t length) {
 
 void broadcastData(uint32_t id, uint8_t* data, size_t len) {
     if (len > 8) len = 8;
-
-    // 1. Send to CAN (So Front Module can log it to SD)
-    twai_message_t txMsg = {};
-    txMsg.identifier = id;
-    txMsg.extd = 0;
-    txMsg.data_length_code = len;
-    memcpy(txMsg.data, data, len);
-    if (!rearCanReady || twai_transmit(&txMsg, pdMS_TO_TICKS(5)) != ESP_OK) {
-        rearCanTxFailures++;
-    }
-
-    // 2. Send to MQTT Queue (So we send it to cloud)
-    TelemetryMessage tMsg;
-    tMsg.id = id;
-    tMsg.len = len;
-    tMsg.timestamp = millis();
-    memcpy(tMsg.data, data, len);
-    
-    // Never stall acquisition on a full network queue.
-    if (!mqttQueue || xQueueSend(mqttQueue, &tMsg, 0) != pdTRUE) {
-        rearMqttQueueDrops++;
-    }
+    const uint32_t timestamp = millis();
+    sendCanMessage(id, data, len);
+    submitTelemetry(id, data, len, timestamp);
 }
 
 static uint16_t saturateU16(uint32_t value) {
@@ -62,7 +500,7 @@ void sendHealthFrame() {
 
     uint16_t queueDrops = saturateU16(rearMqttQueueDrops);
     uint16_t publishFailures = saturateU16(rearMqttPublishFailures);
-    uint8_t queueFree = mqttQueue ? min((UBaseType_t)255, uxQueueSpacesAvailable(mqttQueue)) : 0;
+    uint8_t queueFree = telemetryFreeSlots();
     uint8_t flags = 0;
 
     if (rearMqttQueueDrops > 0) flags |= 0x01;
@@ -73,6 +511,7 @@ void sendHealthFrame() {
     if (WiFi.status() == WL_CONNECTED) flags |= 0x10;
     if (otaReady) flags |= 0x20;
 #endif
+    if (rearGpsMissedDeadlines > 0 || rearGpsQueueLosses > 0) flags |= 0x40;
 
     uint8_t healthMsg[8] = {
         HEALTH_NODE_REAR,
@@ -117,13 +556,13 @@ static bool gnssDegreesMinutesToDecimal(float rawCoordinate,
 }
 
 // --- GPS HELPER ---
-bool getFastGPS() {
+bool getFastGPS(GPSPoint &point) {
     uint8_t fixStatus = 0;
     float rawLatitude = 0.0f;
     float rawLongitude = 0.0f;
     float speedKnots = 0.0f;
     if (!modem.getGPS(&fixStatus, &rawLatitude, &rawLongitude, &speedKnots) ||
-        (fixStatus != 1 && fixStatus != 2 && fixStatus != 3)) {
+        (fixStatus != 2 && fixStatus != 3)) {
         return false;
     }
 
@@ -138,6 +577,10 @@ bool getFastGPS() {
     gps_lat = decimalLatitude;
     gps_lon = decimalLongitude;
     gps_speed = speedKnots * 1.852f;
+
+    point.lat = decimalLatitude;
+    point.lon = decimalLongitude;
+    point.speed = gps_speed;
 
     return true;
 }
@@ -188,107 +631,212 @@ void Sensor_Task(void *pvParameters) {
     }
 }
 
-// --- TASK: MQTT UPLOAD & GPS (Lower Priority) ---
-void MQTT_Task(void *pvParameters) {
-    unsigned long lastGpsRead = 0;
-    TelemetryMessage msg;
-    char payload[224];
-    char record[48];
-    char hexData[20];
+// --- TASK: GPS ACQUISITION ---
+void GPS_Task(void *pvParameters) {
+    const uint8_t configuredRateHz = gpsRateHz;
+    const uint32_t periodMs = 1000UL / (configuredRateHz > 0 ? configuredRateHz : 1);
+    const TickType_t frequency = pdMS_TO_TICKS(periodMs);
+    TickType_t lastWake = xTaskGetTickCount();
 
     while (1) {
-        // --- GPS READING (1Hz) ---
-        if (millis() - lastGpsRead > 1000) {
-            lastGpsRead = millis();
-            const uint32_t gpsQueryStart = millis();
-            if(getFastGPS()) {
-                const uint32_t gpsSampleTime =
-                    gpsQueryStart + (millis() - gpsQueryStart) / 2;
-                GPSPoint point = {
-                    (double)gps_lat,
-                    (double)gps_lon,
-                    gps_speed,
-                    gpsSampleTime
-                };
+        vTaskDelayUntil(&lastWake, frequency);
+        const TickType_t wakeNow = xTaskGetTickCount();
+        if ((TickType_t)(wakeNow - lastWake) >= frequency) {
+            const uint32_t missed = max(
+                (uint32_t)1,
+                (uint32_t)((wakeNow - lastWake) / max((TickType_t)1, frequency)));
+            rearGpsMissedDeadlines += missed;
+            lastWake = wakeNow;
+            nextGpsDeadlineMs = millis() + periodMs;
+            continue;
+        }
+        const uint32_t queryStart = millis();
+        nextGpsDeadlineMs = queryStart + periodMs;
 
-                // Keep lap timing independent from CAN and MQTT availability.
-                if (lapGpsQueue && xQueueSend(lapGpsQueue, &point, 0) != pdTRUE) {
-                    GPSPoint discardedPoint;
-                    xQueueReceive(lapGpsQueue, &discardedPoint, 0);
-                    xQueueSend(lapGpsQueue, &point, 0);
-                }
-                
-                // Pack Lat/Lon (2 floats = 8 bytes)
-                uint8_t posMsg[8];
-                memcpy(&posMsg[0], (const void*)&gps_lat, 4);
-                memcpy(&posMsg[4], (const void*)&gps_lon, 4);
-                broadcastData(CAN_ID_GPS_POS, posMsg, 8);
+        GPSPoint point = {};
+        const uint32_t mutexWaitMs = periodMs > 20 ? periodMs - 20 : periodMs;
+        if (!takeModem(mutexWaitMs)) {
+            rearGpsMissedDeadlines++;
+            continue;
+        }
+        const bool validFix = getFastGPS(point);
+        giveModem();
 
-                // Pack Speed (1 float = 4 bytes)
-                uint8_t spdMsg[4];
-                memcpy(&spdMsg[0], (const void*)&gps_speed, 4);
-                broadcastData(CAN_ID_GPS_SPD, spdMsg, 4);
+        if (validFix) {
+            point.timestamp = queryStart + (millis() - queryStart) / 2;
+            rearGpsHasFix = true;
+
+            if (xQueueSend(lapGpsQueue, &point, 0) != pdTRUE) {
+                GPSPoint discardedPoint;
+                xQueueReceive(lapGpsQueue, &discardedPoint, 0);
+                xQueueSend(lapGpsQueue, &point, 0);
+                rearGpsQueueLosses++;
             }
+
+            const float latitude = (float)point.lat;
+            const float longitude = (float)point.lon;
+            uint8_t positionData[8];
+            uint8_t speedData[4];
+            memcpy(positionData, &latitude, sizeof(latitude));
+            memcpy(positionData + sizeof(latitude), &longitude, sizeof(longitude));
+            memcpy(speedData, &point.speed, sizeof(point.speed));
+            sendCanMessage(CAN_ID_GPS_POS, positionData, sizeof(positionData));
+            sendCanMessage(CAN_ID_GPS_SPD, speedData, sizeof(speedData));
+            submitGpsTelemetry(point);
         }
 
-        // --- MQTT CONNECTION ---
-        if (!mqtt.connected()) {
+        const TickType_t now = xTaskGetTickCount();
+        if ((TickType_t)(now - lastWake) >= frequency) {
+            const uint32_t missed = max((uint32_t)1,
+                (uint32_t)((now - lastWake) / max((TickType_t)1, frequency)));
+            rearGpsMissedDeadlines += missed;
+            lastWake = now;
+            nextGpsDeadlineMs = millis() + periodMs;
+        }
+    }
+}
+
+// --- TASK: LTE/MQTT STATE MACHINE ---
+void MQTT_Task(void *pvParameters) {
+    bool networkConfigured = false;
+    bool gprsReady = false;
+    bool agpsAttempted = false;
+    bool mqttOnline = false;
+    uint8_t connectionFailures = 0;
+    uint32_t lastNetworkAttempt = 0;
+    uint32_t lastConnectAttempt = 0;
+    uint32_t lastMqttLoop = 0;
+    uint32_t lastPublish = 0;
+    char payload[MQTT_PAYLOAD_BUFFER_SIZE];
+
+    setTelemetryOnline(false);
+
+    while (1) {
+        const uint32_t now = millis();
+
+        if (!networkConfigured && !gpsDeadlineImminent() && takeModem(200)) {
+            modem.sendAT("+CNMP=38");
+            networkConfigured = modem.waitResponse(1000L) == 1;
+            giveModem();
+            if (!networkConfigured) vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
+
+        if (!gprsReady) {
             rearMqttConnected = false;
-            // Bound TinyGSM's otherwise long default TCP connection attempt so
-            // broker failure cannot stop the next GNSS sample for tens of seconds.
-            if (!client.connected() && !client.connect(mqtt_server, 1883, 1)) {
-                vTaskDelay(pdMS_TO_TICKS(100));
+            mqttOnline = false;
+            setTelemetryOnline(false);
+            if (now - lastNetworkAttempt < 1000 || gpsDeadlineImminent()) {
+                vTaskDelay(pdMS_TO_TICKS(20));
                 continue;
             }
-            if (mqtt.connect("RearModuleIdentifier")) {
-                rearMqttConnected = true;
-                // This is a live dashboard: discard an outage backlog rather
-                // than presenting old samples as current after reconnect.
-                xQueueReset(mqttQueue);
-                DEBUG_PRINTLN("MQTT Connected");
-            } else {
-                vTaskDelay(pdMS_TO_TICKS(100)); // Retry next loop
-                continue;
-            }
-        }
-        rearMqttConnected = true;
-        mqtt.loop();
+            lastNetworkAttempt = now;
 
-        // --- MQTT UPLOAD PROCESSING ---
-        // Batch several records into one publish. Sending every CAN frame as a
-        // separate modem AT transaction cannot reliably sustain the normal
-        // front + rear frame rate.
-        int count = 0;
-        size_t payloadLength = 0;
-        payload[0] = '\0';
-        while (count < 6 && xQueueReceive(mqttQueue, &msg, 0) == pdTRUE) {
-            // Convert data to Hex
-            hexData[0] = '\0';
-            for (int i = 0; i < msg.len; i++) {
-                sprintf(hexData + (i*2), "%02X", msg.data[i]);
+            bool networkReady = false;
+            if (takeModem(500)) {
+                networkReady = modem.isNetworkConnected();
+                giveModem();
             }
-
-            const int recordLength = snprintf(record, sizeof(record),
-                                              "%lu,%X,%s",
-                                              msg.timestamp, msg.id, hexData);
-            if (recordLength <= 0 || recordLength >= (int)sizeof(record) ||
-                payloadLength + (count > 0 ? 1 : 0) + recordLength >= sizeof(payload)) {
-                rearMqttQueueDrops++;
+            if (!networkReady) {
+                vTaskDelay(pdMS_TO_TICKS(20));
                 continue;
             }
 
-            if (count > 0) payload[payloadLength++] = ';';
-            memcpy(payload + payloadLength, record, (size_t)recordLength);
-            payloadLength += (size_t)recordLength;
-            payload[payloadLength] = '\0';
-            count++;
+            if (takeModem(5000)) {
+                gprsReady = modem.gprsConnect(apn, user, pass);
+                giveModem();
+            }
+            if (!gprsReady) {
+                vTaskDelay(pdMS_TO_TICKS(500));
+                continue;
+            }
+            DEBUG_PRINTLN("GPRS connected");
         }
 
-        if (count > 0 && !mqtt.publish(mqtt_topic, payload)) {
-            rearMqttPublishFailures++;
+        if (!agpsAttempted) {
+            agpsAttempted = true;
+            if (!rearGpsHasFix && takeModem(1000)) {
+                modem.sendAT("+CAGPS");
+                const bool accepted = modem.waitResponse(2000L) == 1;
+                const bool assisted = accepted &&
+                    modem.waitResponse(9000L, "+AGPS: success.", "+AGPS:") == 1;
+                giveModem();
+                if (!assisted) rearGpsAssistanceFailures++;
+                DEBUG_PRINTLN(assisted ? "A-GPS assistance loaded" :
+                                           "A-GPS unavailable; using standalone GNSS");
+            }
         }
 
-        // Yield to let IDLE tasks run and watchdog kick
+        if (!mqttOnline) {
+            rearMqttConnected = false;
+            setTelemetryOnline(false);
+            if (now - lastConnectAttempt < 1000 || gpsDeadlineImminent()) {
+                vTaskDelay(pdMS_TO_TICKS(20));
+                continue;
+            }
+            lastConnectAttempt = now;
+
+            bool connected = false;
+            if (takeModem(1500)) {
+                if (!client.connected()) client.connect(mqtt_server, 1883, 1);
+                connected = client.connected() && mqtt.connect("RearModuleIdentifier");
+                giveModem();
+            }
+            if (!connected) {
+                if (++connectionFailures >= 3) {
+                    connectionFailures = 0;
+                    gprsReady = false;
+                    agpsAttempted = false;
+                }
+                vTaskDelay(pdMS_TO_TICKS(20));
+                continue;
+            }
+
+            connectionFailures = 0;
+            mqttOnline = true;
+            rearMqttConnected = true;
+            setTelemetryOnline(true);
+            lastMqttLoop = now;
+            lastPublish = now - MQTT_PUBLISH_PERIOD_MS;
+            DEBUG_PRINTLN("MQTT connected");
+        }
+
+        if (now - lastMqttLoop >= MQTT_LOOP_PERIOD_MS && !gpsDeadlineImminent()) {
+            bool loopOk = false;
+            if (takeModem(300)) {
+                loopOk = mqtt.loop();
+                giveModem();
+            }
+            lastMqttLoop = now;
+            if (!loopOk) {
+                mqttOnline = false;
+                rearMqttConnected = false;
+                setTelemetryOnline(false);
+                continue;
+            }
+        }
+
+        if (now - lastPublish >= MQTT_PUBLISH_PERIOD_MS && !gpsDeadlineImminent()) {
+            BatchCommit commit = {};
+            const size_t payloadLength = prepareBatch(payload, commit);
+            lastPublish = now;
+            if (payloadLength > 0) {
+                bool published = false;
+                if (takeModem(500)) {
+                    published = mqtt.publish(mqtt_topic, payload);
+                    giveModem();
+                }
+                if (published) {
+                    commitBatch(commit);
+                } else {
+                    rearMqttPublishFailures++;
+                    mqttOnline = false;
+                    rearMqttConnected = false;
+                    setTelemetryOnline(false);
+                }
+            }
+        }
+
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -325,7 +873,6 @@ void OTA_Task(void *pvParameters) {
 // --- TASK: CAN LISTENER ---
 void CAN_RX_Task(void *pvParameters) {
     twai_message_t rxMsg;
-    TelemetryMessage log;
 
     DEBUG_PRINTLN("--- CAN LISTENER STARTED ---");
 
@@ -340,16 +887,10 @@ void CAN_RX_Task(void *pvParameters) {
                 rearMqttQueueDrops++;
                 continue;
             }
-            DEBUG_PRINTF("RX ID: 0x%X | Len: %d\n", rxMsg.identifier, rxMsg.data_length_code);
-            
-            log.id = rxMsg.identifier;
-            log.len = rxMsg.data_length_code;
-            log.timestamp = millis();
-            memcpy(log.data, rxMsg.data, rxMsg.data_length_code);
-            
-            if (!mqttQueue || xQueueSend(mqttQueue, &log, 0) != pdTRUE) {
-                rearMqttQueueDrops++;
-                DEBUG_PRINTLN("Error: MQTT queue is full, dropping CAN message!");
+            if (acceptFrontCanMessage(rxMsg.identifier, rxMsg.data,
+                                      rxMsg.data_length_code)) {
+                submitTelemetry(rxMsg.identifier, rxMsg.data,
+                                rxMsg.data_length_code, millis());
             }
 
             if (++messagesSinceYield >= 32) {

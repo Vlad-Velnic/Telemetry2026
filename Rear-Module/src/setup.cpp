@@ -16,6 +16,51 @@ const char pass[] = "";
 const char* mqtt_server = "broker.hivemq.com"; 
 const char* mqtt_topic = "tuiracing";
 
+static bool responseListsRate(const String &response, uint8_t rate) {
+    int value = -1;
+    int rangeStart = -1;
+    bool readingRangeEnd = false;
+    for (size_t i = 0; i < response.length(); ++i) {
+        const char ch = response.charAt(i);
+        if (ch >= '0' && ch <= '9') {
+            if (value < 0) value = 0;
+            value = value * 10 + (ch - '0');
+            continue;
+        }
+        if (ch == '-' && value >= 0) {
+            rangeStart = value;
+            value = -1;
+            readingRangeEnd = true;
+            continue;
+        }
+        if (readingRangeEnd && value >= 0 && rangeStart <= rate && rate <= value) {
+            return true;
+        }
+        if (!readingRangeEnd && value == rate) return true;
+        value = -1;
+        rangeStart = -1;
+        readingRangeEnd = false;
+    }
+    return (readingRangeEnd && value >= 0 && rangeStart <= rate && rate <= value) ||
+           (!readingRangeEnd && value == rate);
+}
+
+static uint8_t configureGpsRate() {
+    String supportedRates;
+    modem.sendAT("+CGPSNMEARATE=?");
+    const bool queryOk = modem.waitResponse(2000L, supportedRates) == 1;
+
+    const uint8_t candidates[] = {5, 2, 1};
+    for (uint8_t candidate : candidates) {
+        if (queryOk && !responseListsRate(supportedRates, candidate)) continue;
+        if (modem.setGPSOutputRate(candidate)) return candidate;
+    }
+
+    // Some firmware omits the test-command response but still accepts 1 Hz.
+    modem.setGPSOutputRate(1);
+    return 1;
+}
+
 void setupPins() {
     // Modem Power
     pinMode(MODEM_POWER_ON, OUTPUT);
@@ -37,6 +82,7 @@ void setupPins() {
 }
 
 void setupModem() {
+    rearModemReady = false;
     DEBUG_PRINTLN("Initializing Modem...");
     SerialAT.begin(115200, SERIAL_8N1, MODEM_RX, MODEM_TX);
 
@@ -60,30 +106,39 @@ void setupModem() {
         DEBUG_PRINTLN("Modem Hardware Fail!"); 
         // We continue anyway to not block other features
     } else {
-        modem.init("0000");
-        DEBUG_PRINTLN("Modem Init OK. Connecting to Network...");
-        
-        // Network Connect
-        modem.sendAT("+CNMP=38"); // Force LTE
-        modem.waitResponse();
-        
-        if (!modem.waitForNetwork(10000L) || !modem.gprsConnect(apn, user, pass)) {
-            DEBUG_PRINTLN("Network Fail (GPS/MQTT may not work)");
-        } else {
-            DEBUG_PRINTLN("Network OK");
+        if (!modem.init("0000")) {
+            DEBUG_PRINTLN("Modem initialization failed");
+            return;
         }
-        
-        // GPS Setup
+        DEBUG_PRINTLN("Modem Init OK");
+
+        // Start GNSS before network registration so satellite acquisition can
+        // proceed while the lower-priority MQTT task brings LTE online.
         DEBUG_PRINTLN("Configuring GNSS...");
         modem.sendAT("+CGNSSPWR=0"); modem.waitResponse();
-        modem.sendAT("+CGNSSMODE=3"); modem.waitResponse(); // GPS+GLONASS+BDS
-        modem.sendAT("+CGNSSPWR=1"); modem.waitResponse();
+        modem.sendAT("+CGNSSPWR=1");
+        if (modem.waitResponse(30000UL, "+CGNSSPWR: READY!", "ERROR") != 1) {
+            DEBUG_PRINTLN("GNSS failed to become ready");
+            return;
+        }
+
+        // Foreign A7670E/SA UNICORE variants use mode 3 for
+        // GPS + GLONASS + GALILEO + SBAS + QZSS.
+        if (!modem.setGPSMode(3)) {
+            DEBUG_PRINTLN("GNSS mode configuration failed");
+        }
+        gpsRateHz = configureGpsRate();
+        DEBUG_PRINTF("GNSS output rate: %u Hz\n", gpsRateHz);
+        rearModemReady = true;
     }
 }
 
 void setupMQTT() {
     mqtt.setServer(mqtt_server, 1883);
-    mqtt.setSocketTimeout(2);
+    mqtt.setSocketTimeout(1);
+    if (!mqtt.setBufferSize(MQTT_PACKET_BUFFER_SIZE)) {
+        DEBUG_PRINTLN("MQTT packet buffer allocation failed");
+    }
     // Callback can be added here if we need to receive commands
 }
 

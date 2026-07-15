@@ -9,13 +9,6 @@
 #define CAN_ID_GYRO           0x502 // Data: [GX_H, GX_L, GY_H, GY_L, GZ_H, GZ_L]
 
 // ================================================================
-// ENGINE (MEGASQUIRT)
-// ================================================================
-#define CAN_ID_RPM            0x600 
-#define CAN_ID_VOLTAGE        0x601
-#define CAN_ID_WATER_TEMP     0x602
-
-// ================================================================
 // REAR MODULE SENSORS
 // ================================================================
 #define CAN_ID_GEAR           0x700 // Data: [GearNum]

@@ -97,14 +97,6 @@ void CAN_Task(void *pvParameters) {
                 frontCanQueueDrops++;
             }
 
-            // Track every required signal independently so one live frame
-            // cannot hide a different stale ECU/rear signal.
-            if (rxMsg.identifier == CAN_ID_RPM && rxMsg.data_length_code >= 2)
-                lastRpmCanRxMs = rxTimestamp;
-            if (rxMsg.identifier == CAN_ID_VOLTAGE && rxMsg.data_length_code >= 1)
-                lastVoltageCanRxMs = rxTimestamp;
-            if (rxMsg.identifier == CAN_ID_WATER_TEMP && rxMsg.data_length_code >= 1)
-                lastWaterTempCanRxMs = rxTimestamp;
             if (rxMsg.identifier == CAN_ID_GEAR && rxMsg.data_length_code >= 1)
                 lastGearCanRxMs = rxTimestamp;
             if (rxMsg.identifier == CAN_ID_REAR_ANALOG && rxMsg.data_length_code >= 6)
@@ -114,17 +106,19 @@ void CAN_Task(void *pvParameters) {
             }
 
             // 2. Update Display Variables (Only if relevant)
-            if (rxMsg.identifier == CAN_ID_RPM && rxMsg.data_length_code >= 2) {
-                currentRPM = (rxMsg.data[0] << 8) | rxMsg.data[1];
-            }
-            else if (rxMsg.identifier == CAN_ID_VOLTAGE && rxMsg.data_length_code >= 1) {
-                currentBat = (float)rxMsg.data[0] / 10.0;
-            }
-            else if (rxMsg.identifier == CAN_ID_WATER_TEMP && rxMsg.data_length_code >= 1) {
-                currentTemp = (float)rxMsg.data[0];
-            }
-            else if (rxMsg.identifier == CAN_ID_GEAR && rxMsg.data_length_code >= 1) {
+            if (rxMsg.identifier == CAN_ID_GEAR && rxMsg.data_length_code >= 1) {
                 currentGear = rxMsg.data[0];
+            }
+            else if (rxMsg.identifier == CAN_ID_REAR_ANALOG &&
+                     rxMsg.data_length_code >= 6) {
+                currentBrakePressure = ((uint16_t)rxMsg.data[4] << 8) |
+                                       rxMsg.data[5];
+            }
+            else if (rxMsg.identifier == CAN_ID_GPS_SPD &&
+                     rxMsg.data_length_code >= sizeof(float)) {
+                float speed = 0.0f;
+                memcpy(&speed, rxMsg.data, sizeof(speed));
+                currentGpsSpeed = speed;
             }
             else if (rxMsg.identifier == CAN_ID_LAPTIME && rxMsg.data_length_code >= 4) {
                 lastLapTime = ((uint32_t)rxMsg.data[0] << 24) | ((uint32_t)rxMsg.data[1] << 16) | ((uint32_t)rxMsg.data[2] << 8) | (uint32_t)rxMsg.data[3];
@@ -211,7 +205,8 @@ void SD_Task(void *pvParameters) {
     }
 }
 
-void updateDisplay(u_int8_t currentGear, unsigned long lastLapTime, float currentTemp, float currentBatteryVoltage, int currentRPM)
+void updateDisplay(uint8_t currentGear, unsigned long lastLapTime,
+                   float gpsSpeed, uint16_t brakePressure)
 {
     display.clearDisplay();
 
@@ -235,38 +230,45 @@ void updateDisplay(u_int8_t currentGear, unsigned long lastLapTime, float curren
     display.setCursor(50, 8);
     display.printf("%01d:%02d:%d", mins, secs, tenths);
 
-    // Right side temp and voltage
     display.setTextSize(1);
 
     if (NO_GPS)
     {
-        display.setCursor(55, 30);
+        display.setCursor(50, 25);
         display.printf("G");
     }
 
     if (NO_REAR)
     {
-        display.setCursor(65, 30);
+        display.setCursor(60, 25);
         display.printf("R");
     }
 
-    if (NO_ECU)
-    {
-        display.setCursor(75, 30);
-        display.printf("E");
+    // GPS speed is retained even while stale; the G marker communicates age.
+    display.setCursor(50, 34);
+    display.printf("%.1f km/h", gpsSpeed);
+
+    display.setCursor(50, 51);
+    display.print("B");
+    display.drawRect(BRAKE_BAR_X, BRAKE_BAR_Y, BRAKE_BAR_WIDTH,
+                     BRAKE_BAR_HEIGHT, SSD1306_WHITE);
+
+    size_t fillWidth = 0;
+    if (BRAKE_PRESSURE_MAX_RAW <= BRAKE_PRESSURE_MIN_RAW) {
+        static bool calibrationWarningShown = false;
+        if (!calibrationWarningShown) {
+            DEBUG_PRINTLN(F("Invalid brake pressure calibration: max <= min"));
+            calibrationWarningShown = true;
+        }
+    } else {
+        fillWidth = displayedBrakeBarFillWidth(
+            brakePressure, NO_REAR, BRAKE_PRESSURE_MIN_RAW,
+            BRAKE_PRESSURE_MAX_RAW, BRAKE_BAR_INTERIOR_WIDTH);
     }
-
-    // Temperature
-    display.setCursor(100, 42);
-    display.printf("%.0f%cC", currentTemp, 247);
-
-    // RPM
-    display.setCursor(51, 42);
-    display.printf("%d", currentRPM);
-
-    // Battery voltage
-    display.setCursor(95, 57);
-    display.printf("%.1fV", currentBatteryVoltage);
+    if (fillWidth > 0) {
+        display.fillRect(BRAKE_BAR_X + 1, BRAKE_BAR_Y + 1, fillWidth,
+                         BRAKE_BAR_INTERIOR_HEIGHT, SSD1306_WHITE);
+    }
 
     display.display();
 }

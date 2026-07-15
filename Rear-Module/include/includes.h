@@ -18,6 +18,7 @@
 #include <TinyGsmClient.h>
 #include <PubSubClient.h>
 #include "driver/twai.h" // Native CAN driver
+#include "freertos/semphr.h"
 
 // --- CONFIGURATION ---
 extern const char apn[];
@@ -42,11 +43,18 @@ static constexpr uint32_t OTA_RECONNECT_INTERVAL_MS = 10000;
 #define SENSOR_FREQ_HZ 25
 #define SENSOR_PERIOD_MS (1000 / SENSOR_FREQ_HZ)
 #define HEALTH_PERIOD_MS 5000
+static constexpr uint32_t MQTT_PUBLISH_PERIOD_MS = 200;
+static constexpr uint32_t MQTT_LOOP_PERIOD_MS = 100;
+static constexpr uint32_t MQTT_ANALOG_PERIOD_MS = 100;
+static constexpr uint32_t MQTT_GEAR_REFRESH_MS = 1000;
+static constexpr uint32_t MQTT_GPS_GUARD_MS = 50;
+static constexpr uint16_t MQTT_PACKET_BUFFER_SIZE = 512;
+static constexpr size_t MQTT_PAYLOAD_BUFFER_SIZE = 480;
 
 // --- LAP TIMING CONFIGURATION ---
 // Set this to 1 after replacing the four gate coordinates below.
 // Coordinates must use the same decimal-degree convention as gps_lat/gps_lon.
-#define LAP_TIMING_ENABLED 0
+#define LAP_TIMING_ENABLED 1
 static constexpr double LAP_GATE_LEFT_LAT = 0.0;
 static constexpr double LAP_GATE_LEFT_LON = 0.0;
 static constexpr double LAP_GATE_RIGHT_LAT = 0.0;
@@ -54,7 +62,7 @@ static constexpr double LAP_GATE_RIGHT_LON = 0.0;
 static constexpr uint32_t LAP_MIN_TIME_MS = 10000;
 static constexpr uint32_t LAP_MAX_SAMPLE_GAP_MS = 2500;
 static constexpr float LAP_MIN_CROSSING_SPEED_KMH = 5.0f;
-static constexpr uint8_t LAP_GPS_QUEUE_LENGTH = 8;
+static constexpr uint8_t LAP_GPS_QUEUE_LENGTH = 16;
 
 // Health frame node IDs
 #define HEALTH_NODE_FRONT 1
@@ -73,15 +81,23 @@ extern volatile int currentGear;
 extern volatile uint32_t rearMqttQueueDrops;
 extern volatile uint32_t rearMqttPublishFailures;
 extern volatile uint32_t rearCanTxFailures;
+extern volatile uint32_t rearGpsMissedDeadlines;
+extern volatile uint32_t rearGpsQueueLosses;
+extern volatile uint32_t rearGpsAssistanceFailures;
 extern volatile bool rearCanReady;
 extern volatile bool rearMqttConnected;
+extern volatile bool rearModemReady;
+extern volatile bool rearGpsHasFix;
+extern volatile uint8_t gpsRateHz;
+extern volatile uint32_t nextGpsDeadlineMs;
 #if ENABLE_OTA
 extern volatile bool otaReady;
 #endif
 
 // --- QUEUES ---
-extern QueueHandle_t mqttQueue;
 extern QueueHandle_t lapGpsQueue;
+extern SemaphoreHandle_t modemMutex;
+extern SemaphoreHandle_t telemetryMutex;
 
 // --- DATA STRUCTURES ---
 struct TelemetryMessage {
@@ -89,6 +105,7 @@ struct TelemetryMessage {
     uint8_t len;
     uint8_t data[8];
     unsigned long timestamp;
+    uint32_t sequence;
 };
 
 struct GPSPoint {
@@ -111,13 +128,14 @@ void setupOTA();
 // Loop / Tasks
 void CAN_RX_Task(void *pvParameters);
 void Sensor_Task(void *pvParameters);
-void MQTT_Task(void *pvParameters); // Unified MQTT handler
+void GPS_Task(void *pvParameters);
+void MQTT_Task(void *pvParameters);
 void LapTime_Task(void *pvParameters); // Calculate lap time based on CAN messages
 #if ENABLE_OTA
 void OTA_Task(void *pvParameters);
 #endif
 void sendHealthFrame();
-bool getFastGPS();
+bool getFastGPS(GPSPoint &point);
 void broadcastData(uint32_t id, uint8_t* data, size_t len);
 int getGear();
 void sendCanMessage(uint32_t id, uint8_t* data, size_t length);

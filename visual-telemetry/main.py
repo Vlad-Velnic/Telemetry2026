@@ -14,9 +14,6 @@ PORT = 1883
 CAN_ID_FRONT_ANALOG = 0x500
 CAN_ID_ACCEL        = 0x501
 CAN_ID_GYRO         = 0x502
-CAN_ID_RPM          = 0x600
-CAN_ID_VOLTAGE      = 0x601
-CAN_ID_WATER_TEMP   = 0x602
 CAN_ID_GEAR         = 0x700
 CAN_ID_REAR_ANALOG  = 0x701
 CAN_ID_GPS_POS      = 0x750
@@ -45,8 +42,7 @@ class TelemetryApp:
 
         # Data Storage
         self.data = {
-            "RPM": 0, "GEAR": "N", "TEMP": 0.0, "BATT": 0.0,
-            "SPD": 0.0, "LAT": 0.0, "LON": 0.0,
+            "GEAR": "N", "SPD": 0.0, "LAT": 0.0, "LON": 0.0,
             "D1": 0, "D2": 0, "STR": 0,
             "RL": 0, "RR": 0, "BRK": 0,
             "AX": 0.0, "AY": 0.0, "AZ": 0.0,
@@ -90,14 +86,14 @@ class TelemetryApp:
         main_container = ttk.Frame(self.root, padding=10)
         main_container.pack(fill=tk.BOTH, expand=True)
 
-        # 1. ENGINE & CRITICAL (Top Row)
-        engine_frame = ttk.LabelFrame(main_container, text=" ENGINE & DRIVE ", padding=10)
-        engine_frame.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=5, pady=5)
+        # 1. DRIVER (Top Row)
+        driver_frame = ttk.LabelFrame(main_container, text=" DRIVER ", padding=10)
+        driver_frame.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=5, pady=5)
 
-        self.lbl_rpm = self.create_val_label(engine_frame, "RPM:", "0", row=0, col=0)
-        self.lbl_gear = self.create_val_label(engine_frame, "GEAR:", "N", row=0, col=1)
-        self.lbl_temp = self.create_val_label(engine_frame, "WATER TEMP:", "0°C", row=0, col=2)
-        self.lbl_batt = self.create_val_label(engine_frame, "BATTERY:", "0.0V", row=0, col=3)
+        self.lbl_gear = self.create_val_label(driver_frame, "GEAR:", "N", row=0, col=0)
+        self.lbl_spd = self.create_val_label(driver_frame, "GPS SPEED:", "0.0 km/h", row=0, col=1)
+        self.lbl_brk = self.create_val_label(driver_frame, "BRAKE PRESS:", "0", row=0, col=2)
+        self.lbl_lap = self.create_val_label(driver_frame, "LAST LAP:", "--:--.-", row=0, col=3)
 
         # 2. FRONT SENSORS
         front_frame = ttk.LabelFrame(main_container, text=" FRONT SENSORS ", padding=10)
@@ -113,17 +109,14 @@ class TelemetryApp:
 
         self.lbl_rl = self.create_val_label(rear_frame, "Damper RL:", "0", row=0, col=0)
         self.lbl_rr = self.create_val_label(rear_frame, "Damper RR:", "0", row=1, col=0)
-        self.lbl_brk = self.create_val_label(rear_frame, "Brake Press:", "0", row=2, col=0)
 
         # 4. GPS & MOTION
         gps_frame = ttk.LabelFrame(main_container, text=" GPS & MOTION ", padding=10)
         gps_frame.grid(row=2, column=0, sticky="nsew", padx=5, pady=5)
 
-        self.lbl_spd = self.create_val_label(gps_frame, "Speed:", "0.0 km/h", row=0, col=0)
-        self.lbl_coords = self.create_val_label(gps_frame, "Coords:", "0.0, 0.0", row=1, col=0)
-        self.lbl_accel = self.create_val_label(gps_frame, "Accel (XYZ):", "0, 0, 0", row=2, col=0)
-        self.lbl_gyro = self.create_val_label(gps_frame, "Gyro (XYZ):", "0, 0, 0", row=3, col=0)
-        self.lbl_lap = self.create_val_label(gps_frame, "Last lap:", "--:--.-", row=4, col=0)
+        self.lbl_coords = self.create_val_label(gps_frame, "Coords:", "0.0, 0.0", row=0, col=0)
+        self.lbl_accel = self.create_val_label(gps_frame, "Accel (XYZ):", "0, 0, 0", row=1, col=0)
+        self.lbl_gyro = self.create_val_label(gps_frame, "Gyro (XYZ):", "0, 0, 0", row=2, col=0)
 
         # 5. SYSTEM HEALTH
         health_frame = ttk.LabelFrame(main_container, text=" SYSTEM HEALTH ", padding=10)
@@ -198,15 +191,9 @@ class TelemetryApp:
                 self.data["MSG_COUNT"] += 1
 
                 # Parsing Logic
-                if can_id == CAN_ID_RPM and len(raw_data) >= 2:
-                    self.data["RPM"] = (raw_data[0] << 8) | raw_data[1]
-                elif can_id == CAN_ID_GEAR and len(raw_data) >= 1:
+                if can_id == CAN_ID_GEAR and len(raw_data) >= 1:
                     g = raw_data[0]
                     self.data["GEAR"] = "N" if g == 0 else str(g)
-                elif can_id == CAN_ID_VOLTAGE and len(raw_data) >= 1:
-                    self.data["BATT"] = raw_data[0] / 10.0
-                elif can_id == CAN_ID_WATER_TEMP and len(raw_data) >= 1:
-                    self.data["TEMP"] = raw_data[0]
                 elif can_id == CAN_ID_FRONT_ANALOG and len(raw_data) >= 6:
                     self.data["D1"] = (raw_data[0] << 8) | raw_data[1]
                     self.data["D2"] = (raw_data[2] << 8) | raw_data[3]
@@ -249,10 +236,7 @@ class TelemetryApp:
             last_seen = self.last_seen.copy()
 
         # Update Labels from Storage
-        self.lbl_rpm.config(text=f"{data['RPM']}")
         self.lbl_gear.config(text=f"{data['GEAR']}")
-        self.lbl_temp.config(text=f"{data['TEMP']}°C")
-        self.lbl_batt.config(text=f"{data['BATT']:.1f}V")
         
         self.lbl_d1.config(text=f"{data['D1']}")
         self.lbl_d2.config(text=f"{data['D2']}")
@@ -278,9 +262,6 @@ class TelemetryApp:
         # Highlight if data is stale
         now = time.time()
         stale_labels = [
-            (CAN_ID_RPM, self.lbl_rpm),
-            (CAN_ID_VOLTAGE, self.lbl_batt),
-            (CAN_ID_WATER_TEMP, self.lbl_temp),
             (CAN_ID_GEAR, self.lbl_gear),
             (CAN_ID_FRONT_ANALOG, self.lbl_d1),
             (CAN_ID_FRONT_ANALOG, self.lbl_d2),
@@ -342,10 +323,12 @@ class TelemetryApp:
         can_state = "CAN FAIL" if flags & 0x02 else "CAN OK"
         mqtt_state = "MQTT OK" if flags & 0x08 else "MQTT NO"
         ota_state = "OTA OK" if flags & 0x20 else "OTA NO"
+        gps_timing = "GPS LOSS" if flags & 0x40 else "GPS OK"
 
         return (
             f"Drops {health['drops']} | Pub fail {health['failures']} | "
-            f"Q free {health['queue_free']} | {can_state} | {mqtt_state} | {ota_state} | "
+            f"Q free {health['queue_free']} | {can_state} | {mqtt_state} | "
+            f"{ota_state} | {gps_timing} | "
             f"HB {health['heartbeat']}{stale}"
         )
 
@@ -355,7 +338,7 @@ class TelemetryApp:
         if now - health["last_seen"] > 7.0:
             return "orange"
         if (health["drops"] > 0 or health["failures"] > 0 or
-                health["flags"] & 0x07 or
+                health["flags"] & 0x47 or
                 (module == "REAR" and not health["flags"] & 0x08)):
             return "#ff5555"
         return "#00ff00"

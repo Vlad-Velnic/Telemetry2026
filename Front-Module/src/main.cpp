@@ -3,14 +3,10 @@
 QueueHandle_t canQueue;
 char logFileName[32] = "/datalog.csv";
 
-volatile int currentRPM = 0;
-volatile float currentTemp = 0.0;
-volatile float currentBat = 0.0;
 volatile int currentGear = 0;
+volatile float currentGpsSpeed = 0.0;
+volatile uint16_t currentBrakePressure = 0;
 volatile unsigned long lastLapTime = 0;
-volatile unsigned long lastRpmCanRxMs = 0;
-volatile unsigned long lastVoltageCanRxMs = 0;
-volatile unsigned long lastWaterTempCanRxMs = 0;
 volatile unsigned long lastGearCanRxMs = 0;
 volatile unsigned long lastRearAnalogCanRxMs = 0;
 volatile unsigned long lastGpsPositionCanRxMs = 0;
@@ -52,11 +48,6 @@ void loop() {
   unsigned long currentMillis = millis();
 
   // Mark each remote data source missing until a recent valid CAN frame arrives.
-  NO_ECU = lastRpmCanRxMs == 0 || lastVoltageCanRxMs == 0 ||
-           lastWaterTempCanRxMs == 0 ||
-           currentMillis - lastRpmCanRxMs > ECU_CAN_TIMEOUT_MS ||
-           currentMillis - lastVoltageCanRxMs > ECU_CAN_TIMEOUT_MS ||
-           currentMillis - lastWaterTempCanRxMs > ECU_CAN_TIMEOUT_MS;
   NO_REAR = lastGearCanRxMs == 0 || lastRearAnalogCanRxMs == 0 ||
             currentMillis - lastGearCanRxMs > REAR_CAN_TIMEOUT_MS ||
             currentMillis - lastRearAnalogCanRxMs > REAR_CAN_TIMEOUT_MS;
@@ -111,7 +102,8 @@ void loop() {
   // 3. Update Display at a lower frequency (e.g., 10Hz)
   if (currentMillis - lastDisplayUpdate >= DISPLAY_PERIOD_MS) {
     if (displayReady) {
-      updateDisplay(currentGear, lastLapTime, currentTemp, currentBat, currentRPM);
+      updateDisplay(currentGear, lastLapTime, currentGpsSpeed,
+                    currentBrakePressure);
     }
     lastDisplayUpdate = currentMillis;
   }

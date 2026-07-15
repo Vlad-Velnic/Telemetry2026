@@ -4,11 +4,11 @@ void setup() {
     DEBUG_BEGIN(115200);
     DEBUG_PRINTLN("Booting Rear Module...");
 
-    // Increased queue size to handle bursty CAN traffic and high latency
-    mqttQueue = xQueueCreate(200, sizeof(TelemetryMessage));
     lapGpsQueue = xQueueCreate(LAP_GPS_QUEUE_LENGTH, sizeof(GPSPoint));
-    if (!mqttQueue || !lapGpsQueue) {
-        DEBUG_PRINTLN("Telemetry queue allocation failed");
+    modemMutex = xSemaphoreCreateMutex();
+    telemetryMutex = xSemaphoreCreateMutex();
+    if (!lapGpsQueue || !modemMutex || !telemetryMutex) {
+        DEBUG_PRINTLN("Rear task synchronization allocation failed");
     }
 
     setupPins();
@@ -17,14 +17,12 @@ void setup() {
     // Start vehicle-critical acquisition before any potentially slow network
     // initialization. CAN and local sensing must work with the modem absent.
     // Core 0 Task: Listen to external CAN messages
-    if (rearCanReady && mqttQueue) {
+    if (rearCanReady) {
         xTaskCreatePinnedToCore(CAN_RX_Task, "CAN_RX", 4096, NULL, 4, NULL, 0);
     }
 
     // Core 1 Task: Dedicated sensor reading at SENSOR_FREQ_HZ (Higher priority)
-    if (mqttQueue) {
-        xTaskCreatePinnedToCore(Sensor_Task, "Sensor", 4096, NULL, 4, NULL, 1);
-    }
+    xTaskCreatePinnedToCore(Sensor_Task, "Sensor", 4096, NULL, 4, NULL, 1);
 
     setupModem();
     setupMQTT();
@@ -32,8 +30,13 @@ void setup() {
     setupOTA();
 #endif
 
-    // Core 1 Task: MQTT connection, upload processing, and GPS (Blocking/Lower priority)
-    if (mqttQueue && lapGpsQueue) {
+    // GNSS has priority over network work, but both serialize access to the
+    // single A7670 AT UART through modemMutex.
+    if (rearModemReady && lapGpsQueue && modemMutex) {
+        xTaskCreatePinnedToCore(GPS_Task, "GPS", 6144, NULL, 3, NULL, 1);
+    }
+
+    if (rearModemReady && modemMutex && telemetryMutex) {
         xTaskCreatePinnedToCore(MQTT_Task, "MQTT", 8192, NULL, 2, NULL, 1);
     }
 

@@ -22,6 +22,7 @@
 #include "setup.h"
 #include "loop.h"
 #include "canIDs.h"
+#include "brake_bar.h"
 
 // Timing Constants
 #define LOGGING_FREQ_HZ 25
@@ -29,7 +30,6 @@
 #define LOGGING_PERIOD_MS (1000 / LOGGING_FREQ_HZ)
 #define DISPLAY_PERIOD_MS (1000 / DISPLAY_FREQ_HZ)
 #define HEALTH_PERIOD_MS 5000
-#define ECU_CAN_TIMEOUT_MS 1000
 #define REAR_CAN_TIMEOUT_MS 1000
 #define GPS_CAN_TIMEOUT_MS 3000
 
@@ -38,14 +38,10 @@
 #define HEALTH_NODE_REAR 2
 
 // --- DATA GLOBALS (Shared) ---
-extern volatile int currentRPM;
-extern volatile float currentTemp;
-extern volatile float currentBat;
 extern volatile int currentGear;
+extern volatile float currentGpsSpeed;
+extern volatile uint16_t currentBrakePressure;
 extern volatile unsigned long lastLapTime;
-extern volatile unsigned long lastRpmCanRxMs;
-extern volatile unsigned long lastVoltageCanRxMs;
-extern volatile unsigned long lastWaterTempCanRxMs;
 extern volatile unsigned long lastGearCanRxMs;
 extern volatile unsigned long lastRearAnalogCanRxMs;
 extern volatile unsigned long lastGpsPositionCanRxMs;
@@ -57,7 +53,7 @@ extern volatile uint32_t frontSdWriteFailures;
 extern bool mpuReady;
 extern bool displayReady;
 
-extern bool NO_REAR, NO_ECU, NO_GPS;
+extern bool NO_REAR, NO_GPS;
 
 
 // Dedicated SPI instance for SD Card (HSPI)

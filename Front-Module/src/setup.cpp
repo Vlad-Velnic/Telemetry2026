@@ -5,7 +5,7 @@ SPIClass sdSPI(HSPI);
 SPIClass oledSPI(VSPI);
 Adafruit_SSD1306 display(128, 64, &oledSPI, PIN_OLED_DC, PIN_OLED_RESET, PIN_OLED_CS);
 Adafruit_MPU6050 mpu;
-bool NO_REAR = true, NO_ECU = true, NO_GPS = true;
+bool NO_REAR = true, NO_GPS = true;
 bool mpuReady = false;
 bool displayReady = false;
 
