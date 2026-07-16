@@ -58,7 +58,7 @@ static constexpr double LAP_GATE_LEFT_LON = 27.627285593721737;
 static constexpr double LAP_GATE_RIGHT_LAT = 47.149863102801625;
 static constexpr double LAP_GATE_RIGHT_LON = 27.62723964828846;
 static constexpr uint32_t LAP_MIN_TIME_MS = 10000;
-static constexpr uint32_t LAP_MAX_SAMPLE_GAP_MS = 2000;
+static constexpr uint32_t LAP_MAX_SAMPLE_GAP_MS = 2100;
 static constexpr float LAP_MIN_CROSSING_SPEED_KMH = 3.0f;
 static constexpr uint8_t LAP_GPS_QUEUE_LENGTH = 20;
 
