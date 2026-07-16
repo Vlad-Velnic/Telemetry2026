@@ -42,7 +42,6 @@ static constexpr uint32_t OTA_RECONNECT_INTERVAL_MS = 10000;
 // --- TIMING CONSTANTS ---
 #define SENSOR_FREQ_HZ 25
 #define SENSOR_PERIOD_MS (1000 / SENSOR_FREQ_HZ)
-#define HEALTH_PERIOD_MS 5000
 static constexpr uint32_t MQTT_PUBLISH_PERIOD_MS = 200;
 static constexpr uint32_t MQTT_LOOP_PERIOD_MS = 100;
 static constexpr uint32_t MQTT_GEAR_REFRESH_MS = 1000;
@@ -54,18 +53,14 @@ static constexpr size_t MQTT_PAYLOAD_BUFFER_SIZE = 480;
 // Set this to 1 after replacing the four gate coordinates below.
 // Coordinates must use the same decimal-degree convention as gps_lat/gps_lon.
 #define LAP_TIMING_ENABLED 1
-static constexpr double LAP_GATE_LEFT_LAT = 47.1499525;
-static constexpr double LAP_GATE_LEFT_LON = 27.6272855;
-static constexpr double LAP_GATE_RIGHT_LAT = 47.149863;
-static constexpr double LAP_GATE_RIGHT_LON = 27.627239;
+static constexpr double LAP_GATE_LEFT_LAT = 47.14995253905039;
+static constexpr double LAP_GATE_LEFT_LON = 27.627285593721737;
+static constexpr double LAP_GATE_RIGHT_LAT = 47.149863102801625;
+static constexpr double LAP_GATE_RIGHT_LON = 27.62723964828846;
 static constexpr uint32_t LAP_MIN_TIME_MS = 10000;
-static constexpr uint32_t LAP_MAX_SAMPLE_GAP_MS = 2500;
+static constexpr uint32_t LAP_MAX_SAMPLE_GAP_MS = 800;
 static constexpr float LAP_MIN_CROSSING_SPEED_KMH = 3.0f;
 static constexpr uint8_t LAP_GPS_QUEUE_LENGTH = 20;
-
-// Health frame node IDs
-#define HEALTH_NODE_FRONT 1
-#define HEALTH_NODE_REAR 2
 
 // --- GLOBAL OBJECTS ---
 extern TinyGsm modem;
@@ -83,6 +78,11 @@ extern volatile uint32_t rearCanTxFailures;
 extern volatile uint32_t rearGpsMissedDeadlines;
 extern volatile uint32_t rearGpsQueueLosses;
 extern volatile uint32_t rearGpsAssistanceFailures;
+extern volatile uint32_t rearGpsValidEpochs;
+extern volatile uint32_t rearGpsDuplicateEpochs;
+extern volatile uint32_t rearGpsParserFailures;
+extern volatile uint32_t rearGpsEpochGapCount;
+extern volatile uint32_t rearGpsMaxQueryMs;
 extern volatile bool rearCanReady;
 extern volatile bool rearMqttConnected;
 extern volatile bool rearModemReady;
@@ -112,6 +112,7 @@ struct GPSPoint {
     double lon;
     float speed;
     uint32_t timestamp;
+    uint32_t epochKey;
 };
 
 // --- FUNCTION PROTOTYPES ---
@@ -133,7 +134,6 @@ void LapTime_Task(void *pvParameters); // Calculate lap time based on CAN messag
 #if ENABLE_OTA
 void OTA_Task(void *pvParameters);
 #endif
-void sendHealthFrame();
 bool getFastGPS(GPSPoint &point);
 void broadcastData(uint32_t id, uint8_t* data, size_t len);
 int getGear();

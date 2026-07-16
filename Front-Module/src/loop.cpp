@@ -27,36 +27,6 @@ void broadcastData(uint32_t id, uint8_t* data, size_t len) {
     }
 }
 
-static uint16_t saturateU16(uint32_t value) {
-    return value > 0xFFFF ? 0xFFFF : (uint16_t)value;
-}
-
-void sendHealthFrame() {
-    static uint8_t heartbeat = 0;
-
-    uint16_t queueDrops = saturateU16(frontCanQueueDrops);
-    uint16_t txFailures = saturateU16(frontCanTxFailures);
-    uint8_t queueFree = canQueue ? min((UBaseType_t)255, uxQueueSpacesAvailable(canQueue)) : 0;
-    uint8_t flags = 0;
-
-    if (frontCanQueueDrops > 0) flags |= 0x01;
-    if (!frontCanReady) flags |= 0x02;
-    if (!frontSdReady) flags |= 0x04;
-
-    uint8_t healthMsg[8] = {
-        HEALTH_NODE_FRONT,
-        flags,
-        (uint8_t)((queueDrops >> 8) & 0xFF),
-        (uint8_t)(queueDrops & 0xFF),
-        (uint8_t)((txFailures >> 8) & 0xFF),
-        (uint8_t)(txFailures & 0xFF),
-        queueFree,
-        heartbeat++
-    };
-
-    broadcastData(CAN_ID_SYSTEM_HEALTH, healthMsg, 8);
-}
-
 // --- TASK: CAN RECEIVER ---
 void CAN_Task(void *pvParameters) {
     twai_message_t rxMsg;

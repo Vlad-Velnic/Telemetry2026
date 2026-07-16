@@ -20,9 +20,4 @@
 
 #define CAN_ID_LAPTIME        0x777 // Data: [LapTimeMs_B3, LapTimeMs_B2, LapTimeMs_B1, LapTimeMs_B0]
 
-// ================================================================
-// SYSTEM HEALTH
-// ================================================================
-#define CAN_ID_SYSTEM_HEALTH  0x7FF // Data: [Node, Flags, Drop_H, Drop_L, Fail_H, Fail_L, QueueFree, Heartbeat]
-
 #endif

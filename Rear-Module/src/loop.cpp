@@ -11,6 +11,11 @@ volatile uint32_t rearCanTxFailures = 0;
 volatile uint32_t rearGpsMissedDeadlines = 0;
 volatile uint32_t rearGpsQueueLosses = 0;
 volatile uint32_t rearGpsAssistanceFailures = 0;
+volatile uint32_t rearGpsValidEpochs = 0;
+volatile uint32_t rearGpsDuplicateEpochs = 0;
+volatile uint32_t rearGpsParserFailures = 0;
+volatile uint32_t rearGpsEpochGapCount = 0;
+volatile uint32_t rearGpsMaxQueryMs = 0;
 volatile bool rearCanReady = false;
 volatile bool rearMqttConnected = false;
 volatile bool rearModemReady = false;
@@ -89,8 +94,6 @@ struct TelemetryState {
     LatestSlot currentGpsSpeed;
     LatestSlot accel;
     LatestSlot gyro;
-    LatestSlot frontHealth;
-    LatestSlot rearHealth;
     LatestSlot lap;
 
     uint32_t nextSequence = 0;
@@ -104,13 +107,9 @@ struct BatchCommit {
     uint32_t gearSequence = 0;
     uint32_t accelGeneration = 0;
     uint32_t gyroGeneration = 0;
-    uint32_t frontHealthGeneration = 0;
-    uint32_t rearHealthGeneration = 0;
     uint32_t lapGeneration = 0;
     bool accelSent = false;
     bool gyroSent = false;
-    bool frontHealthSent = false;
-    bool rearHealthSent = false;
     bool lapSent = false;
     bool snapshot = false;
 };
@@ -152,11 +151,8 @@ static void setTelemetryOnline(bool online) {
     xSemaphoreGive(telemetryMutex);
 }
 
-static bool acceptFrontCanMessage(uint32_t id, const uint8_t *data, size_t len) {
-    if (id == CAN_ID_ACCEL || id == CAN_ID_GYRO) {
-        return true;
-    }
-    return id == CAN_ID_SYSTEM_HEALTH && len >= 1 && data[0] == HEALTH_NODE_FRONT;
+static bool acceptFrontCanMessage(uint32_t id) {
+    return id == CAN_ID_ACCEL || id == CAN_ID_GYRO;
 }
 
 static void submitTelemetry(uint32_t id, const uint8_t *data, size_t len,
@@ -184,12 +180,6 @@ static void submitTelemetry(uint32_t id, const uint8_t *data, size_t len,
         }
     } else if (id == CAN_ID_LAPTIME) {
         updateSlot(telemetryState.lap, message, true);
-    } else if (id == CAN_ID_SYSTEM_HEALTH && len >= 1) {
-        if (data[0] == HEALTH_NODE_FRONT) {
-            updateSlot(telemetryState.frontHealth, message, true);
-        } else if (data[0] == HEALTH_NODE_REAR) {
-            updateSlot(telemetryState.rearHealth, message, true);
-        }
     }
 
     xSemaphoreGive(telemetryMutex);
@@ -223,16 +213,6 @@ static void submitGpsTelemetry(const GPSPoint &point) {
         rearMqttQueueDrops++;
     }
     xSemaphoreGive(telemetryMutex);
-}
-
-static uint8_t telemetryFreeSlots() {
-    if (!telemetryMutex || xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(2)) != pdTRUE) {
-        return 0;
-    }
-    const size_t freeSlots = telemetryState.gps.free() +
-                             telemetryState.gear.free();
-    xSemaphoreGive(telemetryMutex);
-    return (uint8_t)min(freeSlots, (size_t)255);
 }
 
 static int formatRecord(const TelemetryMessage &message, char *record, size_t size) {
@@ -328,12 +308,6 @@ static size_t prepareBatch(char *payload, BatchCommit &commit) {
                    slotIsFresh(telemetryState.currentGpsSpeed, now, 3000),
                    ignored, ignoredGeneration);
         ignored = false;
-        appendSlot(telemetryState.frontHealth,
-                   slotIsFresh(telemetryState.frontHealth, now, 10000),
-                   commit.frontHealthSent, commit.frontHealthGeneration);
-        appendSlot(telemetryState.rearHealth,
-                   slotIsFresh(telemetryState.rearHealth, now, 10000),
-                   commit.rearHealthSent, commit.rearHealthGeneration);
         appendSlot(telemetryState.accel,
                    slotIsFresh(telemetryState.accel, now, 1000),
                    commit.accelSent, commit.accelGeneration);
@@ -357,12 +331,6 @@ static size_t prepareBatch(char *payload, BatchCommit &commit) {
         if (!appendGpsPair(payload, payloadLength, pair)) break;
         commit.gpsSequence = pair.sequence;
     }
-    appendSlot(telemetryState.frontHealth,
-               telemetryState.frontHealth.valid && telemetryState.frontHealth.dirty,
-               commit.frontHealthSent, commit.frontHealthGeneration);
-    appendSlot(telemetryState.rearHealth,
-               telemetryState.rearHealth.valid && telemetryState.rearHealth.dirty,
-               commit.rearHealthSent, commit.rearHealthGeneration);
     appendSlot(telemetryState.accel,
                telemetryState.accel.valid && telemetryState.accel.dirty,
                commit.accelSent, commit.accelGeneration);
@@ -387,10 +355,6 @@ static void commitBatch(const BatchCommit &commit) {
     telemetryState.gear.discardThrough(commit.gearSequence);
     clearSlotIfSent(telemetryState.accel, commit.accelSent, commit.accelGeneration);
     clearSlotIfSent(telemetryState.gyro, commit.gyroSent, commit.gyroGeneration);
-    clearSlotIfSent(telemetryState.frontHealth, commit.frontHealthSent,
-                    commit.frontHealthGeneration);
-    clearSlotIfSent(telemetryState.rearHealth, commit.rearHealthSent,
-                    commit.rearHealthGeneration);
     clearSlotIfSent(telemetryState.lap, commit.lapSent, commit.lapGeneration);
     if (commit.snapshot) telemetryState.snapshotPending = false;
     xSemaphoreGive(telemetryMutex);
@@ -431,42 +395,6 @@ void broadcastData(uint32_t id, uint8_t* data, size_t len) {
     }
 }
 
-static uint16_t saturateU16(uint32_t value) {
-    return value > 0xFFFF ? 0xFFFF : (uint16_t)value;
-}
-
-void sendHealthFrame() {
-    static uint8_t heartbeat = 0;
-
-    uint16_t queueDrops = saturateU16(rearMqttQueueDrops);
-    uint16_t publishFailures = saturateU16(rearMqttPublishFailures);
-    uint8_t queueFree = telemetryFreeSlots();
-    uint8_t flags = 0;
-
-    if (rearMqttQueueDrops > 0) flags |= 0x01;
-    if (!rearCanReady) flags |= 0x02;
-    if (rearMqttPublishFailures > 0) flags |= 0x04;
-    if (rearMqttConnected) flags |= 0x08;
-#if ENABLE_OTA
-    if (WiFi.status() == WL_CONNECTED) flags |= 0x10;
-    if (otaReady) flags |= 0x20;
-#endif
-    if (rearGpsMissedDeadlines > 0 || rearGpsQueueLosses > 0) flags |= 0x40;
-
-    uint8_t healthMsg[8] = {
-        HEALTH_NODE_REAR,
-        flags,
-        (uint8_t)((queueDrops >> 8) & 0xFF),
-        (uint8_t)(queueDrops & 0xFF),
-        (uint8_t)((publishFailures >> 8) & 0xFF),
-        (uint8_t)(publishFailures & 0xFF),
-        queueFree,
-        heartbeat++
-    };
-
-    broadcastData(CAN_ID_SYSTEM_HEALTH, healthMsg, 8);
-}
-
 int getGear() {
     // Returns 1-6 if pin active, 0 if none (Neutral)
     if (!digitalRead(PIN_GEAR_0)) return 1;
@@ -483,8 +411,22 @@ bool getFastGPS(GPSPoint &point) {
     float rawLatitude = 0.0f;
     float rawLongitude = 0.0f;
     float speedKnots = 0.0f;
-    if (!modem.getGPS(&fixStatus, &rawLatitude, &rawLongitude, &speedKnots) ||
-        (fixStatus != 2 && fixStatus != 3)) {
+    int year = 0;
+    int month = 0;
+    int day = 0;
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    int millisecond = 0;
+    const bool queryOk = modem.getGPSWithMilliseconds(
+        &fixStatus, &rawLatitude, &rawLongitude, &speedKnots, &year, &month,
+        &day, &hour, &minute, &second, &millisecond);
+    if (!queryOk) {
+        // No-fix replies report status zero and are expected during acquisition.
+        if (fixStatus == 2 || fixStatus == 3) rearGpsParserFailures++;
+        return false;
+    }
+    if (fixStatus != 2 && fixStatus != 3) {
         return false;
     }
 
@@ -493,7 +435,11 @@ bool getFastGPS(GPSPoint &point) {
     // belongs here. This point is the canonical value for lap timing, CAN, and MQTT.
     if (!isfinite(rawLatitude) || fabsf(rawLatitude) > 90.0f ||
         !isfinite(rawLongitude) || fabsf(rawLongitude) > 180.0f ||
-        !isfinite(speedKnots) || speedKnots < 0.0f) {
+        !isfinite(speedKnots) || speedKnots < 0.0f ||
+        day < 1 || day > 31 || hour < 0 || hour > 23 ||
+        minute < 0 || minute > 59 || second < 0 || second > 60 ||
+        millisecond < 0 || millisecond > 999) {
+        rearGpsParserFailures++;
         return false;
     }
 
@@ -504,6 +450,10 @@ bool getFastGPS(GPSPoint &point) {
     point.lat = rawLatitude;
     point.lon = rawLongitude;
     point.speed = gps_speed;
+    point.epochKey =
+        (((((uint32_t)day * 24U + (uint32_t)hour) * 60U +
+           (uint32_t)minute) * 60U + (uint32_t)second) * 1000U) +
+        (uint32_t)millisecond;
 
     return true;
 }
@@ -512,15 +462,12 @@ bool getFastGPS(GPSPoint &point) {
 void Sensor_Task(void *pvParameters) {
     TickType_t xLastWakeTime = xTaskGetTickCount();
     const TickType_t xFrequency = pdMS_TO_TICKS(SENSOR_PERIOD_MS);
-    unsigned long lastHealthSend = 0;
     int stableGear = 0;
     int candidateGear = 0;
     uint8_t candidateSamples = 0;
 
     while (1) {
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
-        unsigned long currentMillis = millis();
-
         // A. Read Analog (Rear Dampers + Brake)
         int dL = analogRead(PIN_DAMPER_RL);
         int dR = analogRead(PIN_DAMPER_RR);
@@ -547,10 +494,6 @@ void Sensor_Task(void *pvParameters) {
         uint8_t gearMsg[1] = { (uint8_t)stableGear };
         broadcastData(CAN_ID_GEAR, gearMsg, 1);
 
-        if (currentMillis - lastHealthSend >= HEALTH_PERIOD_MS) {
-            lastHealthSend = currentMillis;
-            sendHealthFrame();
-        }
     }
 }
 
@@ -560,6 +503,10 @@ void GPS_Task(void *pvParameters) {
     const uint32_t periodMs = 1000UL / (configuredRateHz > 0 ? configuredRateHz : 1);
     const TickType_t frequency = pdMS_TO_TICKS(periodMs);
     TickType_t lastWake = xTaskGetTickCount();
+    uint32_t lastEpochKey = UINT32_MAX;
+    uint32_t lastAcceptedAt = 0;
+    uint32_t lastDiagnosticAt = millis();
+    nextGpsDeadlineMs = millis() + periodMs;
 
     while (1) {
         vTaskDelayUntil(&lastWake, frequency);
@@ -584,34 +531,53 @@ void GPS_Task(void *pvParameters) {
         }
         const bool validFix = getFastGPS(point);
         giveModem();
+        const uint32_t queryDuration = millis() - queryStart;
+        if (queryDuration > rearGpsMaxQueryMs) rearGpsMaxQueryMs = queryDuration;
 
         if (validFix) {
             point.timestamp = queryStart + (millis() - queryStart) / 2;
             rearGpsHasFix = true;
 
-            const bool lapGateConfigured = LAP_TIMING_ENABLED &&
-                isfinite(LAP_GATE_LEFT_LAT) && isfinite(LAP_GATE_LEFT_LON) &&
-                isfinite(LAP_GATE_RIGHT_LAT) && isfinite(LAP_GATE_RIGHT_LON) &&
-                (fabs(LAP_GATE_LEFT_LAT - LAP_GATE_RIGHT_LAT) > 1e-12 ||
-                 fabs(LAP_GATE_LEFT_LON - LAP_GATE_RIGHT_LON) > 1e-12);
-            if (lapGateConfigured &&
-                xQueueSend(lapGpsQueue, &point, 0) != pdTRUE) {
-                GPSPoint discardedPoint;
-                xQueueReceive(lapGpsQueue, &discardedPoint, 0);
-                xQueueSend(lapGpsQueue, &point, 0);
-                rearGpsQueueLosses++;
-            }
+            const bool newEpoch = point.epochKey != lastEpochKey;
+            if (!newEpoch) {
+                rearGpsDuplicateEpochs++;
+            } else {
+                lastEpochKey = point.epochKey;
+                if (lastAcceptedAt != 0) {
+                    const uint32_t sampleGap = point.timestamp - lastAcceptedAt;
+                    if (sampleGap > periodMs + periodMs / 2U) {
+                        const uint32_t missing =
+                            max((uint32_t)1, sampleGap / periodMs - 1U);
+                        rearGpsEpochGapCount += missing;
+                    }
+                }
+                lastAcceptedAt = point.timestamp;
+                rearGpsValidEpochs++;
 
-            const float latitude = (float)point.lat;
-            const float longitude = (float)point.lon;
-            uint8_t positionData[8];
-            uint8_t speedData[4];
-            memcpy(positionData, &latitude, sizeof(latitude));
-            memcpy(positionData + sizeof(latitude), &longitude, sizeof(longitude));
-            memcpy(speedData, &point.speed, sizeof(point.speed));
-            sendCanMessage(CAN_ID_GPS_POS, positionData, sizeof(positionData));
-            sendCanMessage(CAN_ID_GPS_SPD, speedData, sizeof(speedData));
-            submitGpsTelemetry(point);
+                const bool lapGateConfigured = LAP_TIMING_ENABLED &&
+                    isfinite(LAP_GATE_LEFT_LAT) && isfinite(LAP_GATE_LEFT_LON) &&
+                    isfinite(LAP_GATE_RIGHT_LAT) && isfinite(LAP_GATE_RIGHT_LON) &&
+                    (fabs(LAP_GATE_LEFT_LAT - LAP_GATE_RIGHT_LAT) > 1e-12 ||
+                     fabs(LAP_GATE_LEFT_LON - LAP_GATE_RIGHT_LON) > 1e-12);
+                if (lapGateConfigured &&
+                    xQueueSend(lapGpsQueue, &point, 0) != pdTRUE) {
+                    GPSPoint discardedPoint;
+                    xQueueReceive(lapGpsQueue, &discardedPoint, 0);
+                    xQueueSend(lapGpsQueue, &point, 0);
+                    rearGpsQueueLosses++;
+                }
+
+                const float latitude = (float)point.lat;
+                const float longitude = (float)point.lon;
+                uint8_t positionData[8];
+                uint8_t speedData[4];
+                memcpy(positionData, &latitude, sizeof(latitude));
+                memcpy(positionData + sizeof(latitude), &longitude, sizeof(longitude));
+                memcpy(speedData, &point.speed, sizeof(point.speed));
+                sendCanMessage(CAN_ID_GPS_POS, positionData, sizeof(positionData));
+                sendCanMessage(CAN_ID_GPS_SPD, speedData, sizeof(speedData));
+                submitGpsTelemetry(point);
+            }
         }
 
         const TickType_t now = xTaskGetTickCount();
@@ -621,6 +587,18 @@ void GPS_Task(void *pvParameters) {
             rearGpsMissedDeadlines += missed;
             lastWake = now;
             nextGpsDeadlineMs = millis() + periodMs;
+        }
+
+        if (millis() - lastDiagnosticAt >= 5000U) {
+            lastDiagnosticAt = millis();
+            DEBUG_PRINTF(
+                "GPS epochs=%lu duplicates=%lu missed=%lu gaps=%lu parser=%lu maxQuery=%lums\n",
+                (unsigned long)rearGpsValidEpochs,
+                (unsigned long)rearGpsDuplicateEpochs,
+                (unsigned long)rearGpsMissedDeadlines,
+                (unsigned long)rearGpsEpochGapCount,
+                (unsigned long)rearGpsParserFailures,
+                (unsigned long)rearGpsMaxQueryMs);
         }
     }
 }
@@ -816,8 +794,7 @@ void CAN_RX_Task(void *pvParameters) {
                 rearMqttQueueDrops++;
                 continue;
             }
-            if (acceptFrontCanMessage(rxMsg.identifier, rxMsg.data,
-                                      rxMsg.data_length_code)) {
+            if (acceptFrontCanMessage(rxMsg.identifier)) {
                 submitTelemetry(rxMsg.identifier, rxMsg.data,
                                 rxMsg.data_length_code, millis());
             }

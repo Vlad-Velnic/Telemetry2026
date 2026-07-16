@@ -41,7 +41,6 @@ void setup() {
 void loop() {
   static TickType_t lastWakeTime = xTaskGetTickCount();
   static unsigned long lastDisplayUpdate = 0;
-  static unsigned long lastHealthUpdate = 0;
   static unsigned long lastMpuRetry = 0;
   unsigned long currentMillis = millis();
 
@@ -102,11 +101,6 @@ void loop() {
       updateDisplay(currentGear, lastLapTime, currentGpsSpeed);
     }
     lastDisplayUpdate = currentMillis;
-  }
-
-  if (currentMillis - lastHealthUpdate >= HEALTH_PERIOD_MS) {
-    sendHealthFrame();
-    lastHealthUpdate = currentMillis;
   }
 
   // Precise LOGGING_FREQ_HZ loop timing

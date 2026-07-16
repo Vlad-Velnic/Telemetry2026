@@ -30,8 +30,8 @@ void setup() {
     setupOTA();
 #endif
 
-    // GNSS has priority over network work, but both serialize access to the
-    // single A7670 AT UART through modemMutex.
+    // GNSS and network work serialize access to the single A7670 AT UART
+    // through modemMutex. MQTT remains at the explicitly selected priority 4.
     if (rearModemReady && lapGpsQueue && modemMutex) {
         xTaskCreatePinnedToCore(GPS_Task, "GPS", 6144, NULL, 3, NULL, 1);
     }

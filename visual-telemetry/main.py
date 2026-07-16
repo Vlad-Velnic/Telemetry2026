@@ -17,10 +17,6 @@ CAN_ID_GEAR         = 0x700
 CAN_ID_GPS_POS      = 0x750
 CAN_ID_GPS_SPD      = 0x751
 CAN_ID_LAPTIME      = 0x777
-CAN_ID_SYSTEM_HEALTH = 0x7FF
-
-HEALTH_NODE_FRONT = 1
-HEALTH_NODE_REAR = 2
 
 class TelemetryApp:
     def __init__(self, root):
@@ -45,16 +41,6 @@ class TelemetryApp:
             "GX": 0.0, "GY": 0.0, "GZ": 0.0,
             "LAP_MS": 0,
             "LAST_MSG": "None", "MSG_COUNT": 0
-        }
-        self.health = {
-            "FRONT": {
-                "drops": 0, "failures": 0, "queue_free": 0,
-                "flags": 0, "heartbeat": 0, "last_seen": 0
-            },
-            "REAR": {
-                "drops": 0, "failures": 0, "queue_free": 0,
-                "flags": 0, "heartbeat": 0, "last_seen": 0
-            }
         }
         self.last_seen = {}
         self.data_lock = threading.Lock()
@@ -92,20 +78,13 @@ class TelemetryApp:
 
         # 2. GPS & MOTION
         gps_frame = ttk.LabelFrame(main_container, text=" GPS & MOTION ", padding=10)
-        gps_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        gps_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=5, pady=5)
 
         self.lbl_coords = self.create_val_label(gps_frame, "Coords:", "0.0, 0.0", row=0, col=0)
         self.lbl_accel = self.create_val_label(gps_frame, "Accel (XYZ):", "0, 0, 0", row=1, col=0)
         self.lbl_gyro = self.create_val_label(gps_frame, "Gyro (XYZ):", "0, 0, 0", row=2, col=0)
 
-        # 3. SYSTEM HEALTH
-        health_frame = ttk.LabelFrame(main_container, text=" SYSTEM HEALTH ", padding=10)
-        health_frame.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
-
-        self.lbl_front_health = self.create_val_label(health_frame, "Front:", "No data", row=0, col=0)
-        self.lbl_rear_health = self.create_val_label(health_frame, "Rear:", "No data", row=1, col=0)
-
-        # 6. STATUS BAR
+        # 3. STATUS BAR
         status_frame = tk.Frame(self.root, bg="#333333", pady=5)
         status_frame.pack(fill=tk.X, side=tk.BOTTOM)
         
@@ -187,17 +166,6 @@ class TelemetryApp:
                     self.data["SPD"] = struct.unpack("<f", raw_data[:4])[0]
                 elif can_id == CAN_ID_LAPTIME and len(raw_data) >= 4:
                     self.data["LAP_MS"] = struct.unpack(">I", raw_data[:4])[0]
-                elif can_id == CAN_ID_SYSTEM_HEALTH and len(raw_data) >= 8:
-                    node = raw_data[0]
-                    module = "FRONT" if node == HEALTH_NODE_FRONT else "REAR" if node == HEALTH_NODE_REAR else None
-
-                    if module:
-                        self.health[module]["flags"] = raw_data[1]
-                        self.health[module]["drops"] = (raw_data[2] << 8) | raw_data[3]
-                        self.health[module]["failures"] = (raw_data[4] << 8) | raw_data[5]
-                        self.health[module]["queue_free"] = raw_data[6]
-                        self.health[module]["heartbeat"] = raw_data[7]
-                        self.health[module]["last_seen"] = time.time()
 
         except Exception as e:
             self.mqtt_status = f"Bad telemetry packet: {e}"
@@ -217,8 +185,6 @@ class TelemetryApp:
         lap_ms = data["LAP_MS"]
         if lap_ms:
             self.lbl_lap.config(text=f"{lap_ms // 60000}:{(lap_ms // 1000) % 60:02d}.{(lap_ms // 100) % 10}")
-
-        self.update_health_labels()
 
         # Update status bar with packet count
         self.status_var.set(f"{self.mqtt_status} | Packets: {data['MSG_COUNT']}")
@@ -244,62 +210,6 @@ class TelemetryApp:
         )
 
         self.root.after(100, self.update_gui_loop)
-
-    def update_health_labels(self):
-        now = time.time()
-
-        front = self.health["FRONT"]
-        rear = self.health["REAR"]
-
-        self.lbl_front_health.config(
-            text=self.format_health("FRONT", front, now),
-            foreground=self.health_color("FRONT", front, now)
-        )
-        self.lbl_rear_health.config(
-            text=self.format_health("REAR", rear, now),
-            foreground=self.health_color("REAR", rear, now)
-        )
-
-    def format_health(self, module, health, now):
-        if health["last_seen"] == 0:
-            return "No data"
-
-        age = now - health["last_seen"]
-        stale = " STALE" if age > 7.0 else ""
-
-        if module == "FRONT":
-            flags = health["flags"]
-            can_state = "CAN FAIL" if flags & 0x02 else "CAN OK"
-            sd_state = "SD FAIL" if flags & 0x04 else "SD OK"
-            return (
-                f"Drops {health['drops']} | CAN fail {health['failures']} | "
-                f"Q free {health['queue_free']} | {can_state} | {sd_state} | "
-                f"HB {health['heartbeat']}{stale}"
-            )
-
-        flags = health["flags"]
-        can_state = "CAN FAIL" if flags & 0x02 else "CAN OK"
-        mqtt_state = "MQTT OK" if flags & 0x08 else "MQTT NO"
-        ota_state = "OTA OK" if flags & 0x20 else "OTA NO"
-        gps_timing = "GPS LOSS" if flags & 0x40 else "GPS OK"
-
-        return (
-            f"Drops {health['drops']} | Pub fail {health['failures']} | "
-            f"Q free {health['queue_free']} | {can_state} | {mqtt_state} | "
-            f"{ota_state} | {gps_timing} | "
-            f"HB {health['heartbeat']}{stale}"
-        )
-
-    def health_color(self, module, health, now):
-        if health["last_seen"] == 0:
-            return "#aaaaaa"
-        if now - health["last_seen"] > 7.0:
-            return "orange"
-        if (health["drops"] > 0 or health["failures"] > 0 or
-                health["flags"] & 0x47 or
-                (module == "REAR" and not health["flags"] & 0x08)):
-            return "#ff5555"
-        return "#00ff00"
 
 if __name__ == "__main__":
     root = tk.Tk()

@@ -28,13 +28,8 @@
 #define DISPLAY_FREQ_HZ 10
 #define LOGGING_PERIOD_MS (1000 / LOGGING_FREQ_HZ)
 #define DISPLAY_PERIOD_MS (1000 / DISPLAY_FREQ_HZ)
-#define HEALTH_PERIOD_MS 5000
 #define REAR_CAN_TIMEOUT_MS 1000
 #define GPS_CAN_TIMEOUT_MS 3000
-
-// Health frame node IDs
-#define HEALTH_NODE_FRONT 1
-#define HEALTH_NODE_REAR 2
 
 // --- DATA GLOBALS (Shared) ---
 extern volatile int currentGear;

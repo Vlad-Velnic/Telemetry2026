@@ -683,7 +683,7 @@ class TinyGsmA76xx : public TinyGsmModem<TinyGsmA76xx<modemType>>,
   bool getGPSImpl(uint8_t* status, float* lat, float* lon, float* speed = 0,
                   float* alt = 0, int* vsat = 0, int* usat = 0, float* accuracy = 0,
                   int* year = 0, int* month = 0, int* day = 0, int* hour = 0,
-                  int* minute = 0, int* second = 0) {
+                  int* minute = 0, int* second = 0, int* millisecond = 0) {
     thisModem().sendAT(GF("+CGNSSINFO"));
     if (thisModem().waitResponse(GF(GSM_NL "+CGNSSINFO: ")) != 1) { return false; }
 
@@ -737,12 +737,12 @@ class TinyGsmA76xx : public TinyGsmModem<TinyGsmA76xx<modemType>>,
       ispeed =
           thisModem().streamGetFloatBefore(',');  // Speed Over Ground. Unit is knots.
       thisModem().streamSkipUntil(',');           // Course Over Ground. Degrees.
-      thisModem().streamSkipUntil(',');  // After set, will report GPS every x seconds
       iaccuracy =
           thisModem().streamGetFloatBefore(',');  // Position Dilution Of Precision
       thisModem().streamSkipUntil(',');           // Horizontal Dilution Of Precision
-      thisModem().streamSkipUntil(',');           // Vertical Dilution Of Precision
-      thisModem().streamSkipUntil('\n');          // TODO(?) is one more field reported??
+      // VDOP is the final documented field. Stop at its newline. Searching for
+      // two more commas consumed the trailing OK and caused four 1-second waits.
+      thisModem().streamSkipUntil('\n');           // Vertical Dilution Of Precision
       if (status) { *status = fixMode; }
       // Set pointers
       if (lat != NULL) { *lat = (ilat) * (north == 'N' ? 1 : -1); }
@@ -759,6 +759,15 @@ class TinyGsmA76xx : public TinyGsmModem<TinyGsmA76xx<modemType>>,
       if (hour != NULL) *hour = ihour;
       if (minute != NULL) *minute = imin;
       if (second != NULL) *second = static_cast<int>(secondWithSS);
+      if (millisecond != NULL) {
+        const float fractionalSecond =
+            secondWithSS - static_cast<int>(secondWithSS);
+        int parsedMilliseconds =
+            static_cast<int>(fractionalSecond * 1000.0F + 0.5F);
+        if (parsedMilliseconds < 0) parsedMilliseconds = 0;
+        if (parsedMilliseconds > 999) parsedMilliseconds = 999;
+        *millisecond = parsedMilliseconds;
+      }
 
       thisModem().waitResponse();
       // Sometimes, although fix is displayed,
@@ -770,6 +779,18 @@ class TinyGsmA76xx : public TinyGsmModem<TinyGsmA76xx<modemType>>,
     return false;
   }
 
+ public:
+  // A76xx extension: the generic TinyGSM GPS API exposes only whole seconds,
+  // which cannot distinguish all GNSS epochs at 2 or 5 Hz.
+  bool getGPSWithMilliseconds(uint8_t* status, float* lat, float* lon,
+                              float* speed, int* year, int* month, int* day,
+                              int* hour, int* minute, int* second,
+                              int* millisecond) {
+    return getGPSImpl(status, lat, lon, speed, 0, 0, 0, 0, year, month, day,
+                      hour, minute, second, millisecond);
+  }
+
+ protected:
   /*
    * Time functions
    */

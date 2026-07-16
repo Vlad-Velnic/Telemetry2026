@@ -6,6 +6,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REAR_INCLUDES = ROOT / "Rear-Module" / "include" / "includes.h"
+REAR_LOOP = ROOT / "Rear-Module" / "src" / "loop.cpp"
+TINYGSM_A76XX = (
+    ROOT / "Rear-Module" / "lib" / "TinyGSM" / "src" / "TinyGsmClientA76xx.h"
+)
 
 
 def define(name):
@@ -40,12 +44,11 @@ class LatestSlot:
 
 
 class PolicyModel:
-    priorities = ("lap", "gear", "gps", "health", "imu")
+    priorities = ("lap", "gear", "gps", "imu")
 
     def __init__(self):
         self.gps = deque(maxlen=2)
         self.gear = deque(maxlen=4)
-        self.health = {1: None, 2: None}
         self.current = {}
         self.lap = None
         self.overflow = 0
@@ -68,9 +71,24 @@ class TelemetryPolicyTests(unittest.TestCase):
         self.assertEqual(define("SENSOR_FREQ_HZ"), 25)
         self.assertEqual(define("MQTT_PUBLISH_PERIOD_MS"), 200)
         self.assertEqual(define("MQTT_PACKET_BUFFER_SIZE"), 512)
+        self.assertEqual(define("LAP_MAX_SAMPLE_GAP_MS"), 800)
+
+    def test_gps_rate_prefers_five_then_two_hz(self):
+        setup = (ROOT / "Rear-Module" / "src" / "setup.cpp").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("const uint8_t candidates[] = {5, 2, 1};", setup)
+
+    def test_a76xx_parser_stops_after_documented_vdop(self):
+        source = TINYGSM_A76XX.read_text(encoding="utf-8")
+        parser_tail = source[source.index("// VDOP is the final documented field"):
+                             source.index("if (status) { *status = fixMode; }")]
+        self.assertEqual(parser_tail.count("streamSkipUntil(','"), 0)
+        self.assertEqual(parser_tail.count("streamSkipUntil('\\n'"), 1)
+        self.assertIn("getGPSWithMilliseconds", source)
 
     def test_analog_can_ids_are_not_part_of_mqtt_policy(self):
-        accepted = {0x501, 0x502, 0x700, 0x750, 0x751, 0x777, 0x7FF}
+        accepted = {0x501, 0x502, 0x700, 0x750, 0x751, 0x777}
         self.assertNotIn(0x500, accepted)
         self.assertNotIn(0x701, accepted)
 
@@ -88,14 +106,30 @@ class TelemetryPolicyTests(unittest.TestCase):
                             for _, (position, speed) in epochs))
 
     def test_canonical_gps_point_is_decimal_for_can_mqtt_and_lap(self):
-        source = (ROOT / "Rear-Module" / "src" / "loop.cpp").read_text(
-            encoding="utf-8"
-        )
+        source = REAR_LOOP.read_text(encoding="utf-8")
         self.assertIn("point.lat = rawLatitude;", source)
         self.assertIn("point.lon = rawLongitude;", source)
         self.assertNotIn("gnssDegreesMinutesToDecimal", source)
         self.assertIn("xQueueSend(lapGpsQueue, &point", source)
         self.assertIn("submitGpsTelemetry(point);", source)
+        self.assertIn("point.epochKey != lastEpochKey", source)
+
+    def test_lap_gate_is_initialized_in_decimal_degrees(self):
+        text = REAR_INCLUDES.read_text(encoding="utf-8")
+        values = {}
+        for name in (
+            "LAP_GATE_LEFT_LAT", "LAP_GATE_LEFT_LON",
+            "LAP_GATE_RIGHT_LAT", "LAP_GATE_RIGHT_LON",
+        ):
+            match = re.search(rf"{name}\s*=\s*([-0-9.]+)", text)
+            self.assertIsNotNone(match)
+            values[name] = float(match.group(1))
+        self.assertTrue(47.0 < values["LAP_GATE_LEFT_LAT"] < 48.0)
+        self.assertTrue(27.0 < values["LAP_GATE_LEFT_LON"] < 28.0)
+        self.assertNotEqual(
+            (values["LAP_GATE_LEFT_LAT"], values["LAP_GATE_LEFT_LON"]),
+            (values["LAP_GATE_RIGHT_LAT"], values["LAP_GATE_RIGHT_LON"]),
+        )
 
     def test_gear_transitions_and_one_hz_refresh(self):
         samples = [(t, 0 if t < 240 else 1) for t in range(0, 1280, 40)]
@@ -109,20 +143,12 @@ class TelemetryPolicyTests(unittest.TestCase):
             previous = gear
         self.assertEqual(sent, [(0, 0), (240, 1), (1240, 1)])
 
-    def test_health_slots_are_independent(self):
-        policy = PolicyModel()
-        policy.health[1] = "front"
-        policy.health[2] = "rear"
-        self.assertEqual(policy.health, {1: "front", 2: "rear"})
-
     def test_normal_batch_stays_below_pubsubclient_buffer(self):
         records = [
             record(123456789, 0x777, 4),
             record(123456789, 0x700, 1),
             record(123456789, 0x750, 8),
             record(123456789, 0x751, 4),
-            record(123456789, 0x7FF, 8),
-            record(123456789, 0x7FF, 8),
             record(123456789, 0x501, 6),
             record(123456789, 0x502, 6),
         ]
@@ -150,7 +176,7 @@ class TelemetryPolicyTests(unittest.TestCase):
     def test_priority_order(self):
         self.assertEqual(
             PolicyModel.priorities,
-            ("lap", "gear", "gps", "health", "imu"),
+            ("lap", "gear", "gps", "imu"),
         )
 
     def test_disconnect_discards_history_but_preserves_current_and_lap(self):
@@ -166,6 +192,18 @@ class TelemetryPolicyTests(unittest.TestCase):
     def test_ecu_and_unknown_can_ids_are_ignored(self):
         accepted = {0x501, 0x502}
         self.assertFalse({0x500, 0x600, 0x601, 0x602, 0x701, 0x123} & accepted)
+
+    def test_health_frames_do_not_exist(self):
+        sources = [
+            ROOT / "Front-Module" / "include" / "canIDs.h",
+            ROOT / "Rear-Module" / "include" / "canIDs.h",
+            ROOT / "Front-Module" / "src" / "loop.cpp",
+            ROOT / "Rear-Module" / "src" / "loop.cpp",
+        ]
+        for path in sources:
+            source = path.read_text(encoding="utf-8")
+            self.assertNotIn("CAN_ID_SYSTEM_HEALTH", source)
+            self.assertNotIn("sendHealthFrame", source)
 
 
 if __name__ == "__main__":

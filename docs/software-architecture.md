@@ -102,6 +102,13 @@ Responsibilities:
 - Serializes all post-start modem, TCP, and MQTT calls with one mutex and reserves the final 50 ms before each GPS deadline.
 - Publishes one policy-ordered MQTT batch every 200 ms without replaying continuous outage history.
 
+The current LilyGO wiring exposes only the A7670 AT UART, not a separate GNSS
+NMEA UART. High-rate GPS therefore uses deadline-driven `AT+CGNSSINFO` polling.
+The vendored TinyGSM fork stops parsing at the documented final VDOP field and
+retains fractional GNSS time, avoiding the former four-second parser timeout and
+allowing duplicate epochs to be rejected. One canonical decimal-degree epoch is
+then delivered to lap timing, CAN, and MQTT.
+
 ### Visual telemetry dashboard
 
 Location: `visual-telemetry/`
@@ -112,7 +119,7 @@ Responsibilities:
 
 - Connects to `broker.hivemq.com` on topic `tuiracing`.
 - Parses messages in `timestamp,id,data` format.
-- Decodes known MQTT records into gear, acceleration, gyroscope, GPS position/speed, lap time, and module health.
+- Decodes known MQTT records into gear, acceleration, gyroscope, GPS position/speed, and lap time.
 - Highlights stale data for selected critical values.
 
 ## Interfaces
@@ -131,7 +138,6 @@ The CAN bus is the primary in-vehicle telemetry interface. Both ESP32 modules us
 | `0x750` | Rear module | GPS latitude and longitude |
 | `0x751` | Rear module | GPS speed in km/h |
 | `0x777` | Rear module | Lap time in milliseconds |
-| `0x7FF` | Front/rear modules | System health |
 
 ### MQTT telemetry
 
@@ -148,7 +154,7 @@ Example:
 ```
 
 This format keeps cloud telemetry aligned with CAN and SD logging, making debug traces easier to compare.
-One MQTT publication is attempted every 200 ms. Records are separated by semicolons and ordered as lap, gear, GPS, health, then IMU. PubSubClient uses a 512-byte packet buffer and the firmware limits its payload buffer to 480 bytes. The dashboard decodes every record in the batch.
+One MQTT publication is attempted every 200 ms. Records are separated by semicolons and ordered as lap, gear, GPS, then IMU. PubSubClient uses a 512-byte packet buffer and the firmware limits its payload buffer to 480 bytes. The dashboard decodes every record in the batch.
 
 | Signal | Local acquisition / CAN | MQTT policy |
 | --- | ---: | --- |
@@ -159,9 +165,8 @@ One MQTT publication is attempted every 200 ms. Records are separated by semicol
 | Rear analog `0x701` | 25 Hz | Not published |
 | GPS `0x750/0x751` | Best supported 5/2/1 Hz | Every successful atomic sample while connected |
 | Lap `0x777` | Completed lap | Persistent latest value until publish succeeds |
-| Health `0x7FF` | 0.2 Hz per node | Latest value keyed by node |
 
-The fixed policy buffers contain two atomic GPS samples and four gear transitions. IMU and health use generation-protected latest-value slots. A disconnect clears continuous queues but retains current state and the latest lap; reconnect publishes one fresh snapshot. IDs `0x500` and `0x701` remain available on CAN for local consumers and SD logging but never enter MQTT buffering.
+The fixed policy buffers contain two atomic GPS samples and four gear transitions. IMU uses generation-protected latest-value slots. A disconnect clears continuous queues but retains current state and the latest lap; reconnect publishes one fresh snapshot. IDs `0x500` and `0x701` remain available on CAN for local consumers and SD logging but never enter MQTT buffering. Health frames are not defined or transmitted.
 
 ### SD logging
 
