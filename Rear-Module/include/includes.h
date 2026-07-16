@@ -54,10 +54,10 @@ static constexpr size_t MQTT_PAYLOAD_BUFFER_SIZE = 480;
 // Set this to 1 after replacing the four gate coordinates below.
 // Coordinates must use the same decimal-degree convention as gps_lat/gps_lon.
 #define LAP_TIMING_ENABLED 1
-static constexpr double LAP_GATE_LEFT_LAT = 0.0;
-static constexpr double LAP_GATE_LEFT_LON = 0.0;
-static constexpr double LAP_GATE_RIGHT_LAT = 0.0;
-static constexpr double LAP_GATE_RIGHT_LON = 0.0;
+static constexpr double LAP_GATE_LEFT_LAT = 47.1499525;
+static constexpr double LAP_GATE_LEFT_LON = 27.6272855;
+static constexpr double LAP_GATE_RIGHT_LAT = 47.149863;
+static constexpr double LAP_GATE_RIGHT_LON = 27.627239;
 static constexpr uint32_t LAP_MIN_TIME_MS = 10000;
 static constexpr uint32_t LAP_MAX_SAMPLE_GAP_MS = 2500;
 static constexpr float LAP_MIN_CROSSING_SPEED_KMH = 3.0f;
